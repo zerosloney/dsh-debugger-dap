@@ -3,6 +3,10 @@
   "version": "0.1.1",
   "description": "DAP interactive debugger as a DeepSeek Harness plugin: launch debug adapters (debugpy, dlv, or configured stdio adapters), set breakpoints, step, inspect stack/variables, and evaluate expressions through one model-facing debug tool.",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "type": "module",
   "files": [
     "lib/",
