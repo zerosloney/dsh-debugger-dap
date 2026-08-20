@@ -42,16 +42,33 @@ DAP 交互式调试器，作为 [DeepSeek Harness](https://www.npmjs.com/package
 
 ## 安装与挂载
 
-插件已发布到 npm registry（`dsh-debugger-dap`，随 `v*` tag 由 CI 自动发布）；在 profile 的 `package.json` `dependencies` 加入本包，并在 `dsh.profile.bundles` 中列出（本包自带 bundle 声明）：
+插件已发布到 npm registry（`dsh-debugger-dap`，随 `v*` tag 由 CI 自动发布）。在 DeepSeek Harness 中通过 npm 包路径安装——`dsh plugin add` 会安装依赖并自动把包名追加到 profile 的 `dsh.profile.bundles`：
 
 ```sh
-dsh plugin init debugger   # 或手工创建 $DSH_HOME/profiles/debugger
-cd ~/.dsh/profiles/debugger
-npm install dsh-debugger-dap          # 安装最新发布版
-# 升级到新版本:
-npm install dsh-debugger-dap@latest
-# package.json 中声明: "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-bundle-base", "dsh-debugger-dap"] } }
-dsh --profile debugger --dump-config   # 确认 debugger-dap 行已组合
+dsh plugin init debugger                       # 或跳过：add 时会自动创建 profile
+dsh plugin add --profile debugger dsh-debugger-dap
+dsh --profile debugger --dump-config          # 确认 debugger-dap 行已组合
+```
+
+等价的手工方式：编辑 profile 的 `package.json`，在 `dependencies` 与 `dsh.profile.bundles` 各加一行，然后 `pnpm install`：
+
+```json
+{
+  "dependencies": {
+    "dsh-debugger-dap": "^0.1.1"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": ["@deepseek-ai/dsh-base", "dsh-debugger-dap"]
+    }
+  }
+}
+```
+
+`dsh plugin add` 支持任意 npm 包路径（`name`、`name@version`、git URL、tarball、本地目录）。升级到新版本：
+
+```sh
+dsh plugin add --profile debugger dsh-debugger-dap@latest
 ```
 
 也可只作为普通插件行挂载（不走 bundle）：
