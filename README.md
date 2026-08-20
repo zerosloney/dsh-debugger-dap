@@ -1,5 +1,7 @@
 # dsh-debugger-dap
 
+[![npm](https://img.shields.io/npm/v/dsh-debugger-dap)](https://www.npmjs.com/package/dsh-debugger-dap)
+
 DAP 交互式调试器，作为 [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh-tools) 的独立插件：通过一个面向模型的 `debug` 工具完成启动调试适配器、断点、单步、栈/变量检视、表达式求值与程序输出捕获。零宿主源码改动，旁挂即用。
 
 > 📖 完整动作与参数示例见 **[USAGE.md](./USAGE.md)**（29 个动作：launch/attach、函数/异常/内存断点、步进、跳转、检视、源码/模块读取、运行时改值、异常信息等）。
@@ -40,12 +42,14 @@ DAP 交互式调试器，作为 [DeepSeek Harness](https://www.npmjs.com/package
 
 ## 安装与挂载
 
-profile 的 `package.json` `dependencies` 加入本包，并在 `dsh.profile.bundles` 中列出（本包自带 bundle 声明）：
+插件已发布到 npm registry（`dsh-debugger-dap`，随 `v*` tag 由 CI 自动发布）；在 profile 的 `package.json` `dependencies` 加入本包，并在 `dsh.profile.bundles` 中列出（本包自带 bundle 声明）：
 
 ```sh
 dsh plugin init debugger   # 或手工创建 $DSH_HOME/profiles/debugger
 cd ~/.dsh/profiles/debugger
-npm install dsh-debugger-dap
+npm install dsh-debugger-dap          # 安装最新发布版
+# 升级到新版本:
+npm install dsh-debugger-dap@latest
 # package.json 中声明: "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-bundle-base", "dsh-debugger-dap"] } }
 dsh --profile debugger --dump-config   # 确认 debugger-dap 行已组合
 ```
