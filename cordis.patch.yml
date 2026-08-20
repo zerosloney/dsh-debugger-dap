@@ -1,0 +1,20 @@
+# dsh-debugger-dap bundle patch: inserts the DAP interactive debugger
+# into any profile that lists this package in `dsh.profile.bundles`.
+- insert:
+    - id: debugger-dap
+      name: 'dsh-debugger-dap'
+      config:
+        # 等待适配器响应的单请求超时（毫秒）
+        requestTimeoutMs: 30000
+        # continue/step 后等待下一次停机的超时（毫秒）；超时返回 running 状态而非挂死
+        stepTimeoutMs: 10000
+        # 每个会话保留的调试输出环形缓冲上限（字符）
+        maxOutputChars: 40000
+        # stack_trace 返回的最大栈帧数
+        maxStackFrames: 20
+        # scopes/variables 单次返回的最大条目数
+        maxVariables: 100
+        # 渲染给模型的文本结果总上限（字符）
+        maxResultChars: 16000
+        # 追加/覆盖内置适配器配方（debugpy、dlv）
+        adapters: {}

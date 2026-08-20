@@ -1,0 +1,75 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { renderDebugText } from '../lib/format.js'
+
+const baseSnapshot = {
+  id: 'dbg-1',
+  adapter: 'debugpy',
+  program: '/w/app.py',
+  cwd: '/w',
+  status: 'stopped',
+  stopReason: 'breakpoint',
+  threadId: 1,
+  frame: { id: 10, name: 'doWork', path: '/w/src/app.py', line: 42, column: 3 },
+  exitCode: undefined,
+  configuring: false,
+  outputChars: 12,
+}
+
+test('snapshot-first rendering anchors every result', () => {
+  const text = renderDebugText({ action: 'launch', session_id: 'dbg-1', snapshot: baseSnapshot }, 16000)
+  assert.ok(text.includes('Session dbg-1'))
+  assert.ok(text.includes('Adapter: debugpy'))
+  assert.ok(text.includes('Status: stopped'))
+  assert.ok(text.includes('Location: /w/src/app.py:42:3'))
+  assert.ok(text.includes('Captured output: 12 chars'))
+})
+
+test('resume timeout explains the pause escape hatch', () => {
+  const text = renderDebugText(
+    {
+      action: 'continue',
+      snapshot: { ...baseSnapshot, status: 'running', stopReason: undefined, frame: undefined },
+      state: 'running',
+      timed_out: true,
+    },
+    16000,
+  )
+  assert.ok(text.includes('still running'))
+  assert.ok(text.includes('pause'))
+})
+
+test('stack frames render as jumpable references', () => {
+  const text = renderDebugText(
+    { action: 'stack_trace', snapshot: baseSnapshot, frames: [{ id: 10, name: 'doWork', path: '/w/a.py', line: 1, column: 1 }], frames_omitted: 2 },
+    16000,
+  )
+  assert.ok(text.includes('- #10 doWork @ /w/a.py:1:1'))
+  assert.ok(text.includes('2 more frames omitted'))
+})
+
+test('variables carry references for nested expansion', () => {
+  const text = renderDebugText(
+    {
+      action: 'variables',
+      snapshot: baseSnapshot,
+      variables: [{ name: 'items', value: 'list[2]', type: 'list', variablesReference: 101 }],
+      variables_omitted: 0,
+    },
+    16000,
+  )
+  assert.ok(text.includes('- items = list[2] (list) [ref=101]'))
+})
+
+test('results are bounded by maxResultChars', () => {
+  const frames = Array.from({ length: 500 }, (_, index) => ({
+    id: index,
+    name: `frame-${index}`,
+    path: '/very/long/path/to/source/file.ts',
+    line: index,
+    column: 1,
+  }))
+  const text = renderDebugText({ action: 'stack_trace', frames }, 2000)
+  assert.ok(text.length <= 2000)
+  assert.ok(text.includes('truncated (limit 2000'))
+})

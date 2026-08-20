@@ -1,0 +1,48 @@
+{
+  "name": "dsh-debugger-dap",
+  "version": "0.1.1",
+  "description": "DAP interactive debugger as a DeepSeek Harness plugin: launch debug adapters (debugpy, dlv, or configured stdio adapters), set breakpoints, step, inspect stack/variables, and evaluate expressions through one model-facing debug tool.",
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "lib/",
+    "cordis.patch.yml",
+    "README.md",
+    "USAGE.md"
+  ],
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "npm run build && node --test"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1-rc.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}
