@@ -34,11 +34,33 @@ export const DEBUG_ACTIONS = [
   'output',
   'disconnect',
   'sessions',
+  'restart',
+  'source',
+  'loaded_sources',
+  'modules',
+  'set_data_breakpoints',
+  'goto_targets',
+  'goto',
+  'restart_frame',
 ] as const
 
 export type DebugAction = (typeof DEBUG_ACTIONS)[number]
 
-const RESUME_ACTIONS: ReadonlySet<string> = new Set(['continue', 'step_in', 'step_over', 'step_out', 'pause'])
+/**
+ * Actions safe to run in parallel with other tool calls. Everything else is
+ * serialized: debug state is a live state machine (current frame, thread,
+ * stop reason), so only pure reads that do not touch mutable session state
+ * are whitelisted. New actions default to serialized (safe side).
+ */
+export const CONCURRENT_SAFE_ACTIONS: ReadonlySet<string> = new Set([
+  'threads',
+  'stack_trace',
+  'scopes',
+  'variables',
+  'evaluate',
+  'output',
+  'sessions',
+])
 
 /**
  * Recursively drop `undefined`-valued entries so the returned canonical value
@@ -96,6 +118,13 @@ const debugParameters = {
   offset: { type: 'number', description: 'Char offset where the output action starts reading.' },
   max_chars: { type: 'number', description: 'Maximum chars the output action returns (default 4000).' },
   terminate_debuggee: { type: 'boolean', description: 'Also kill the debuggee process on disconnect (default true).' },
+  target_line: { type: 'number', description: 'Source line for goto_targets.' },
+  target_id: { type: 'number', description: 'Target id for goto/restart_frame.' },
+  data_breakpoints: { type: 'array', items: { type: 'json' }, description: 'Data breakpoint specifications for set_data_breakpoints: array of { address?: string, name?: string, access_type?: "read"|"write"|"readWrite" }.' },
+  access_type: { type: 'string', enum: ['read', 'write', 'readWrite'], description: 'Access type for a single data breakpoint shorthand.' },
+  address: { type: 'string', description: 'Memory address for a data breakpoint.' },
+  watch_name: { type: 'string', description: 'Variable name for a watch/data breakpoint.' },
+  restart_frame_id: { type: 'number', description: 'Stack frame id for restart_frame.' },
 } as const
 
 const debugOutputSchema = {
@@ -120,6 +149,11 @@ const debugOutputSchema = {
     exception: { type: 'json' },
     output: { type: 'json' },
     sessions: { type: 'json' },
+    content: { type: 'string' },
+    mime_type: { type: 'string' },
+    sources: { type: 'json' },
+    modules: { type: 'json' },
+    targets: { type: 'json' },
   },
 } as const
 
@@ -152,6 +186,13 @@ export interface DebugArgs {
   offset?: number
   max_chars?: number
   terminate_debuggee?: boolean
+  target_line?: number
+  target_id?: number
+  data_breakpoints?: Array<{ address?: string; name?: string; access_type?: 'read' | 'write' | 'readWrite' }>
+  access_type?: 'read' | 'write' | 'readWrite'
+  address?: string
+  watch_name?: string
+  restart_frame_id?: number
 }
 
 /**
@@ -412,6 +453,56 @@ export async function runDebugAction(
     case 'sessions': {
       return { action: 'sessions', sessions: manager.list(owner) }
     }
+    case 'restart': {
+      const session = manager.sessionFor(owner, args.session_id)
+      const snapshot = await session.restart(signal)
+      return { action: 'restart', session_id: session.id, snapshot }
+    }
+    case 'source': {
+      const session = manager.sessionFor(owner, args.session_id)
+      const content = await session.source(signal)
+      return { action: 'source', session_id: session.id, snapshot: session.snapshot(), content: content.content, mime_type: content.mimeType }
+    }
+    case 'loaded_sources': {
+      const session = manager.sessionFor(owner, args.session_id)
+      const sources = await session.loadedSources(signal)
+      return { action: 'loaded_sources', session_id: session.id, snapshot: session.snapshot(), sources: sources.map(s => ({ path: s.path, name: s.name })) }
+    }
+    case 'modules': {
+      const session = manager.sessionFor(owner, args.session_id)
+      const modules = await session.modules(signal)
+      return { action: 'modules', session_id: session.id, snapshot: session.snapshot(), modules: modules.map(m => ({ id: String(m.id), name: m.name, path: m.path, version: m.version, loaded: m.loaded })) }
+    }
+    case 'set_data_breakpoints': {
+      const session = manager.sessionFor(owner, args.session_id)
+      const explicit = (args.data_breakpoints ?? []).map(bp => ({
+        address: bp.address,
+        name: bp.name,
+        accessType: bp.access_type,
+      }))
+      const shorthand =
+        explicit.length === 0 && (args.address !== undefined || args.watch_name !== undefined)
+          ? [{ address: args.address, name: args.watch_name, accessType: args.access_type }]
+          : []
+      const breakpoints = await session.setDataBreakpoints([...explicit, ...shorthand], signal)
+      return { action: 'set_data_breakpoints', session_id: session.id, snapshot: session.snapshot(), breakpoints: breakpoints.map(bp => ({ id: String(bp.id), verified: bp.verified, message: bp.message })) }
+    }
+    case 'goto_targets': {
+      const session = manager.sessionFor(owner, args.session_id)
+      const targets = await session.gotoTargets(args.target_line ?? session.snapshot().frame?.line ?? 0, signal)
+      return { action: 'goto_targets', session_id: session.id, snapshot: session.snapshot(), targets: targets.map(t => ({ id: t.id, label: t.label, line: t.line })) }
+    }
+    case 'goto': {
+      if (args.target_id === undefined) throw new DebugError('invalid_arguments', "action 'goto' requires 'target_id'.")
+      const session = manager.sessionFor(owner, args.session_id)
+      const snapshot = await session.goto(args.target_id, signal)
+      return { action: 'goto', session_id: session.id, snapshot }
+    }
+    case 'restart_frame': {
+      const session = manager.sessionFor(owner, args.session_id)
+      await session.restartFrame(args.restart_frame_id, signal)
+      return { action: 'restart_frame', session_id: session.id, snapshot: session.snapshot() }
+    }
   }
 }
 
@@ -435,19 +526,7 @@ export function createDebugTool(
     },
     isConcurrencySafe: args => {
       const action = (args as DebugArgs).action
-      return (
-        action !== undefined &&
-        !RESUME_ACTIONS.has(action) &&
-        action !== 'launch' &&
-        action !== 'attach' &&
-        action !== 'disconnect' &&
-        action !== 'set_breakpoints' &&
-        action !== 'set_function_breakpoints' &&
-        action !== 'set_exception_breakpoints' &&
-        action !== 'set_variable' &&
-        action !== 'set_expression' &&
-        action !== 'exception_info'
-      )
+      return action !== undefined && CONCURRENT_SAFE_ACTIONS.has(action)
     },
     execute: async (args, exec) => {
       const owner = requireOwner(exec.agent)

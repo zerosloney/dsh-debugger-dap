@@ -2,12 +2,12 @@
 
 DAP 交互式调试器，作为 [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh-tools) 的独立插件：通过一个面向模型的 `debug` 工具完成启动调试适配器、断点、单步、栈/变量检视、表达式求值与程序输出捕获。零宿主源码改动，旁挂即用。
 
-> 📖 完整动作与参数示例见 **[USAGE.md](./USAGE.md)**（21 个动作：launch/attach、函数/异常断点、步进、检视、运行时改值、异常信息等）。
+> 📖 完整动作与参数示例见 **[USAGE.md](./USAGE.md)**（29 个动作：launch/attach、函数/异常/内存断点、步进、跳转、检视、源码/模块读取、运行时改值、异常信息等）。
 
 
 ## 工具面
 
-单个 `debug` 工具，`action` 参数判别，共 21 个动作：
+单个 `debug` 工具，`action` 参数判别，共 29 个动作：
 
 | 动作 | 说明 | 分层 |
 |---|---|---|
@@ -21,6 +21,13 @@ DAP 交互式调试器，作为 [DeepSeek Harness](https://www.npmjs.com/package
 | `set_variable` / `set_expression` | 在 `variables_ref`/当前帧写入新值 | 执行 |
 | `disconnect` | 结束会话（默认终止被调试进程） | 执行 |
 | `threads` / `stack_trace` / `scopes` / `variables` / `exception_info` / `output` / `sessions` | 检视与读取 | 只读 |
+| `restart` | 按原始 launch 配置重启 debuggee | 执行 |
+| `source` | 读取当前停止位置的源码内容 | 只读 |
+| `loaded_sources` | 列出 debuggee 已加载的所有源文件 | 只读 |
+| `modules` | 列出 debuggee 已加载的模块 | 只读 |
+| `set_data_breakpoints` | 设置内存断点（watchpoint）：地址或变量名 + 读写类型 | 执行 |
+| `goto_targets` / `goto` | 查询可跳转行并执行非顺序跳转 | 执行 |
+| `restart_frame` | 重跑当前栈帧（重新进入当前函数） | 执行 |
 
 设计要点（借鉴 oh-my-pi 的 DAP 实现并按 dsh 习惯重塑）：
 
@@ -95,8 +102,8 @@ npm test   # 构建 + node --test：framing、DAP 握手、状态机、owner 作
 
 ## 已知限制
 
-- **stdio 传输 only**：v1 只支持 stdio DAP 适配器；js-debug 官方发行以 TCP server 为主，需自备 stdio 包装或等 v2 的 server 传输。
-- **attach 按 pid、依赖适配器支持**：已支持 `process_id` 附加（debugpy/netcoredbg 等）；port/pipe 附加与 Windows 下部分适配器的 attach 受其本身能力限制。暂无数据断点、指令断点、汇编、内存读写、restart。
+- **传输层**：stdio（默认）与 TCP 均支持；内置 `codelldb` 配方声明 TCP，spawn 后从 stdout 的 "Listening on port &lt;N&gt;" 自动发现监听端口并连接，其余内置配方走 stdio。js-debug 官方发行以 TCP server 为主，可经 `adapters` 配置声明其命令与 `transport: 'tcp'`/`connectPort`（显式端口优先于 stdout 发现）。
+- **attach 按 pid、依赖适配器支持**：已支持 `process_id` 附加（debugpy/netcoredbg 等）；port/pipe 附加与 Windows 下部分适配器的 attach 受其本身能力限制。暂无指令断点、汇编、内存读写。
 - **权限策略不在工具内**：按 dsh 惯例，审批/沙箱策略应通过宿主 `tools/pre-execute` 扩展点组合，而非内建于工具；launch 会以普通子进程 spawn（未走 `ctx.subprocess` 执行世界）。
 - **会话不跨进程持久**：会话注册表在插件卸载时全部拆除；agent 释放后其遗留会话在插件卸载前保持存活（v1 无逐 agent 生命周期钩子）。
 - **进程终止语义**：disconnect 优先发 DAP `disconnect {terminateDebuggee}`（由适配器负责终止被调试进程），随后 `child.kill()` 杀适配器本身；未做进程组级联强杀。

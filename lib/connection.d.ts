@@ -1,8 +1,5 @@
-/**
- * DAP connection: request/response correlation and event dispatch over a
- * transport abstraction, plus the child-process transport used in production.
- */
 import { type ChildProcess } from 'node:child_process';
+import { type Socket as NetSocket } from 'node:net';
 /** Byte-stream abstraction over the adapter's stdio (or a test double). */
 export interface DapTransport {
     /** Queue one framed write; must not throw after close. */
@@ -83,5 +80,78 @@ export declare function spawnDapAdapter(argv: readonly string[], options?: {
     maxBodyBytes?: number;
     signal?: AbortSignal;
 }): SpawnedAdapter;
+import type { AdapterSpec } from './adapters.js';
+/**
+ * Unified spawn: dispatches to {@link spawnDapAdapter} (stdio) or
+ * {@link spawnTcpAdapter} (tcp) based on `spec.transport`.
+ * Returns a promise for TCP transports (needed for async socket connection)
+ * and a plain value for stdio transports.
+ */
+export declare function spawnAdapter(spec: Pick<AdapterSpec, 'command' | 'args' | 'env' | 'cwd' | 'transport' | 'host' | 'port'>, options: {
+    requestTimeoutMs?: number;
+    maxBodyBytes?: number;
+    signal?: AbortSignal;
+}): SpawnedAdapter | Promise<SpawnedAdapter>;
 /** Adapt one stdio child process into a {@link DapTransport}. */
 export declare function childProcessTransport(child: ChildProcess): DapTransport;
+/** Options for {@link tcpTransport}. */
+export interface TcpTransportOptions {
+    /** Host to connect to. */
+    host: string;
+    /** Port to connect to. */
+    port: number;
+    /** Called when the underlying socket is established. */
+    onConnect?: (socket: NetSocket) => void;
+    /** Called just before the socket is destroyed. */
+    onDisconnect?: (reason: string) => void;
+}
+/**
+ * Adapt one TCP socket into a {@link DapTransport}. The socket is already
+ * connected when this function returns; the transport closes the socket on
+ * {@link DapTransport.close} and notifies all listeners on unexpected EOF.
+ */
+export declare function tcpTransport(socket: NetSocket, options?: TcpTransportOptions): DapTransport;
+/**
+ * Options for {@link spawnTcpAdapter}.
+ * All fields mirror {@link spawnDapAdapter} except `host`/`port` in place of `argv`.
+ */
+export interface TcpSpawnOptions {
+    host?: string;
+    port: number;
+    /** Called when the TCP handshake completes. */
+    onConnect?: (socket: NetSocket) => void;
+    cwd?: string;
+    env?: Record<string, string>;
+    requestTimeoutMs?: number;
+    maxBodyBytes?: number;
+    signal?: AbortSignal;
+}
+/**
+ * Connect to a DAP adapter over TCP (e.g. js-debug, codelldb in TCP mode) and
+ * wrap it in a {@link DapConnection}.  Unlike {@link spawnDapAdapter}, no
+ * child process is spawned — the adapter must already be listening on `port`.
+ *
+ * For adapters that bundle a `launch` command internally (e.g. codelldb
+ * started with a listener port) prefer spawning the adapter as a child
+ * process and connecting to the port it opens; this function only handles the
+ * transport layer.
+ */
+export declare function spawnTcpAdapter(options: TcpSpawnOptions): Promise<SpawnedAdapter>;
+/** Options for {@link spawnTcpAdapterWithDiscovery}. */
+export interface TcpDiscoveryOptions {
+    host?: string;
+    cwd?: string;
+    env?: Record<string, string>;
+    /** How long to wait for the adapter to announce its port on stdout. */
+    discoveryTimeoutMs?: number;
+    requestTimeoutMs?: number;
+    maxBodyBytes?: number;
+    signal?: AbortSignal;
+}
+/**
+ * Spawn a TCP DAP adapter child process and discover its listening port from
+ * stdout, then connect (e.g. codelldb started with `--port 0`, which prints
+ * "Listening on port <N>"). The child's stderr is collected for failure
+ * diagnostics; teardown kills the child and closes the socket.
+ */
+export declare function spawnTcpAdapterWithDiscovery(argv: readonly string[], options?: TcpDiscoveryOptions): Promise<SpawnedAdapter>;

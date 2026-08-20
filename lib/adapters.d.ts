@@ -1,6 +1,7 @@
 /**
- * Adapter recipes: built-in stdio DAP adapters (debugpy, dlv) plus
- * config-declared rows, resolved against PATH with actionable install hints.
+ * Adapter recipes: built-in DAP adapters (debugpy, dlv, netcoredbg,
+ * lldb-dap, js-debug, codelldb) plus config-declared rows, resolved
+ * against PATH with actionable install hints.
  */
 /** One launchable adapter command line. */
 export interface AdapterSpec {
@@ -15,15 +16,27 @@ export interface AdapterSpec {
      * `stopOnEntry`; netcoredbg uses `stopAtEntry`.
      */
     stopOnEntryKey?: string;
+    /** Transport layer. Default `'stdio'`; `'tcp'` means the adapter is reached over TCP. */
+    transport?: 'stdio' | 'tcp';
+    /** Target host for `'tcp'` transport (default `'127.0.0.1'`). */
+    host?: string;
+    /** Target port for `'tcp'` transport. */
+    port?: number;
 }
 /** One `adapters` config row. */
 export interface AdapterConfigEntry {
     command: string;
-    args?: string[];
+    args?: readonly string[];
     env?: Record<string, string>;
     cwd?: string;
     /** Extra per-adapter fields spread into the DAP `launch` request body. */
     launchArgs?: Record<string, unknown>;
+    /** Transport layer: 'stdio' (default) or 'tcp'. */
+    transport?: 'stdio' | 'tcp';
+    /** TCP connect host (default '127.0.0.1'). Used when transport is 'tcp'. */
+    connectHost?: string;
+    /** TCP connect port. Required when transport is 'tcp'. */
+    connectPort?: number;
 }
 /** A recipe: id, command line, and how to probe availability. */
 export interface AdapterRecipe {
@@ -38,6 +51,8 @@ export interface AdapterRecipe {
     launchArgs?: Record<string, unknown>;
     /** `launch` field that carries the stop-on-entry control (default `stopOnEntry`). */
     stopOnEntryKey?: string;
+    /** Transport layer for this recipe: 'stdio' (default) or 'tcp'. */
+    transport?: 'stdio' | 'tcp';
     /** Config row replacing the built-in definition, when present. */
     configOverride?: AdapterConfigEntry;
 }

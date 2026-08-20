@@ -2,15 +2,16 @@
  * dsh-debugger-dap: DAP interactive debugger as a DeepSeek Harness plugin.
  *
  * Mounts one model-facing `debug` tool backed by an owner-scoped session
- * registry. Each launch spawns a configured stdio DAP adapter (built-in
- * recipes: debugpy, dlv) as a child process; every result carries a session
- * snapshot so the model always knows the debuggee location.
+ * registry. Each launch spawns a configured DAP adapter (built-in
+ * recipes: debugpy, dlv, netcoredbg) as a child process over stdio or
+ * TCP; every result carries a session snapshot so the model always knows
+ * where the debuggee is.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { AdapterUnavailableError, resolveAdapter, type AdapterConfigEntry } from './adapters.js'
-import { spawnDapAdapter } from './connection.js'
+import { spawnAdapter } from './connection.js'
 import { DebugSessionManager, type SessionLimits } from './session.js'
 import { createDebugTool } from './tool.js'
 
@@ -29,7 +30,7 @@ export interface Config {
   adapters: Record<string, AdapterConfigEntry>
 }
 
-export const Config: z<Config> = z.object({
+export const Config = z.object({
   requestTimeoutMs: z.natural().min(1000).default(30000).description('Per-request adapter timeout in milliseconds.'),
   stepTimeoutMs: z.natural().min(1000).default(10000).description('How long resume actions wait for the next stop before reporting the program as running.'),
   maxOutputChars: z.natural().min(2000).default(40000).description('Per-session output ring buffer cap in characters.'),
@@ -44,10 +45,18 @@ export const Config: z<Config> = z.object({
         env: z.dict(z.string()),
         cwd: z.string(),
         launchArgs: z.any(),
+        /** Transport layer: 'stdio' (default) or 'tcp'. */
+        transport: z.union([z.const('stdio'), z.const('tcp')]).default('stdio'),
+        /** TCP connect host (default '127.0.0.1'). Used when transport is 'tcp'. */
+        connectHost: z.string().default('127.0.0.1'),
+        /** TCP connect port. Required when transport is 'tcp'. */
+        connectPort: z.number().min(1),
       }),
     )
     .default({})
-    .description('Extra stdio DAP adapters or overrides for the built-in debugpy/dlv recipes, keyed by adapter id. Each entry may carry extra launchArgs spread into the DAP launch request.'),
+    .description(
+      "Extra stdio or TCP DAP adapters or overrides for the built-in debugpy/dlv/netcoredbg recipes, keyed by adapter id. TCP entries: the adapter process is spawned as a child and communicated with over TCP; set connectPort to the port the adapter listens on.",
+    ),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -60,11 +69,7 @@ export function apply(ctx: Context, config: Config): void {
     maxResultChars: config.maxResultChars,
   }
   const manager = new DebugSessionManager({
-    spawn: spec => spawnDapAdapter([spec.command, ...spec.args], {
-      cwd: spec.cwd,
-      env: spec.env,
-      requestTimeoutMs: config.requestTimeoutMs,
-    }),
+    spawn: spec => spawnAdapter(spec, { requestTimeoutMs: config.requestTimeoutMs }),
     resolveAdapter: options => resolveAdapter(options, config.adapters),
     limits,
   })

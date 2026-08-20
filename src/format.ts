@@ -43,7 +43,7 @@ export interface DebugToolValue {
   state?: 'stopped' | 'running' | 'terminated'
   timed_out?: boolean
   file?: string
-  breakpoints?: Array<BreakpointRecord | FunctionBreakpointRecord>
+  breakpoints?: Array<{ id: string; verified: boolean; message?: string } | BreakpointRecord | FunctionBreakpointRecord>
   frames?: DapFrameView[]
   frames_omitted?: number
   threads?: ThreadView[]
@@ -62,6 +62,11 @@ export interface DebugToolValue {
   }
   output?: { text: string; offset: number; total_chars: number; truncated: boolean }
   sessions?: DebugSnapshot[]
+  content?: string
+  mime_type?: string
+  sources?: Array<{ path?: string; name?: string }>
+  modules?: Array<{ id: string; name?: string; path?: string; version?: string; loaded?: boolean }>
+  targets?: Array<{ id: number; label: string; line: number }>
 }
 
 function formatLocation(snapshot: DebugSnapshot | undefined): string | null {
@@ -90,7 +95,7 @@ export function formatSnapshotLines(snapshot: DebugSnapshot): string[] {
 
 export function formatBreakpoints(
   file: string,
-  breakpoints: Array<BreakpointRecord | FunctionBreakpointRecord>,
+  breakpoints: Array<{ id: string; verified: boolean; message?: string } | BreakpointRecord | FunctionBreakpointRecord>,
 ): string[] {
   const lines = [`Breakpoints for ${file}:`]
   if (breakpoints.length === 0) {
@@ -101,6 +106,11 @@ export function formatBreakpoints(
     if ('name' in breakpoint) {
       const bp = breakpoint as FunctionBreakpointRecord
       lines.push(`- ${bp.name}: ${bp.verified ? 'verified' : 'pending'}${bp.message && bp.message.length > 0 ? ` (${bp.message})` : ''}`)
+      continue
+    }
+    if ('id' in breakpoint && !('line' in breakpoint)) {
+      const bp = breakpoint as { id: string; verified: boolean; message?: string }
+      lines.push(`- data breakpoint ${bp.id}: ${bp.verified ? 'verified' : 'pending'}${bp.message && bp.message.length > 0 ? ` (${bp.message})` : ''}`)
       continue
     }
     const record = breakpoint as BreakpointRecord
@@ -263,6 +273,63 @@ export function renderDebugText(value: DebugToolValue, maxResultChars: number): 
       if (info?.stack !== undefined) sections.push(`Stack:\n${info.stack}`)
       break
     }
+    case 'restart':
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      sections.push('Debuggee restarted with the original launch configuration.')
+      break
+    case 'source': {
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      const content = value.content ?? ''
+      if (content.length === 0) {
+        sections.push('Source: (no content returned by the adapter)')
+      } else {
+        sections.push(`Source${value.mime_type !== undefined ? ` (${value.mime_type})` : ''}:\n${content}`)
+      }
+      break
+    }
+    case 'loaded_sources': {
+      const sources = value.sources ?? []
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      sections.push(`Loaded sources (${sources.length}):`)
+      if (sources.length === 0) sections.push('(none)')
+      for (const source of sources) {
+        sections.push(`- ${source.path ?? source.name ?? '<unknown>'}`)
+      }
+      break
+    }
+    case 'modules': {
+      const modules = value.modules ?? []
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      sections.push(`Modules (${modules.length}):`)
+      if (modules.length === 0) sections.push('(none)')
+      for (const module of modules) {
+        const version = module.version !== undefined ? ` v${module.version}` : ''
+        sections.push(`- ${module.name ?? module.path ?? module.id}${version}${module.loaded === false ? ' (unloaded)' : ''}`)
+      }
+      break
+    }
+    case 'set_data_breakpoints':
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      sections.push(...formatBreakpoints('data', value.breakpoints ?? []))
+      break
+    case 'goto_targets': {
+      const targets = value.targets ?? []
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      sections.push(`Goto targets (${targets.length}):`)
+      if (targets.length === 0) sections.push('(none)')
+      for (const target of targets) {
+        sections.push(`- #${target.id} ${target.label} @ line ${target.line}`)
+      }
+      break
+    }
+    case 'goto':
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      sections.push('Execution jumped to the requested target.')
+      break
+    case 'restart_frame':
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      sections.push('Current stack frame restarted (function re-entered).')
+      break
     case 'output':
       sections = formatOutput({
         text: value.output?.text ?? '',

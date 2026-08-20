@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { runDebugAction, DEBUG_ACTIONS, omitUndefined } from '../lib/tool.js'
+import { runDebugAction, DEBUG_ACTIONS, CONCURRENT_SAFE_ACTIONS, omitUndefined } from '../lib/tool.js'
 import { DebugSessionManager } from '../lib/session.js'
 import { createFakeAdapter, standardScript, testLimits } from '../helpers/fake-adapter.mjs'
 
@@ -104,6 +104,19 @@ test('every declared action is reachable in the switch', () => {
   for (const action of DEBUG_ACTIONS) {
     assert.equal(typeof action, 'string')
   }
+})
+
+test('concurrency whitelist covers only pure reads and nothing else', () => {
+  const safe = ['threads', 'stack_trace', 'scopes', 'variables', 'evaluate', 'output', 'sessions']
+  for (const action of safe) {
+    assert.ok(CONCURRENT_SAFE_ACTIONS.has(action), `${action} must be concurrency-safe`)
+  }
+  for (const action of DEBUG_ACTIONS) {
+    if (!safe.includes(action)) {
+      assert.ok(!CONCURRENT_SAFE_ACTIONS.has(action), `${action} must be serialized (not concurrency-safe)`)
+    }
+  }
+  assert.equal(CONCURRENT_SAFE_ACTIONS.size, safe.length, 'whitelist must not contain stale or duplicate entries')
 })
 
 function hasUndefined(value) {

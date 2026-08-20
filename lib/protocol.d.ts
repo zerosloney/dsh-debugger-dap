@@ -44,6 +44,12 @@ export interface DapCapabilities {
     supportsExceptionOptions?: boolean;
     supportsExceptionInfoRequest?: boolean;
     supportsTerminateThreadsRequest?: boolean;
+    supportsLoadedSourcesRequest?: boolean;
+    supportsModulesRequest?: boolean;
+    supportsDataBreakpoints?: boolean;
+    supportsStepBack?: boolean;
+    supportsGotoTargetsRequest?: boolean;
+    supportsRestartFrame?: boolean;
 }
 export declare function readCapabilities(body: Record<string, unknown> | undefined): DapCapabilities;
 /** `stopped` event body. */
@@ -127,6 +133,41 @@ export interface DapBreakpoint {
     message?: string;
 }
 export declare function readBreakpoints(body: Record<string, unknown> | undefined): DapBreakpoint[];
+/** `source` response: contents of a source file. */
+export interface DapSourceContent {
+    content: string;
+    mimeType?: string;
+}
+export declare function readSource(body: Record<string, unknown> | undefined): DapSourceContent;
+/** `loadedSources` response: all source files currently loaded in the debuggee. */
+export interface DapLoadedSource {
+    path?: string;
+    name?: string;
+}
+export declare function readLoadedSources(body: Record<string, unknown> | undefined): DapLoadedSource[];
+/** `modules` response: loaded program modules or shared libraries. */
+export interface DapModule {
+    id: number | string;
+    name?: string;
+    path?: string;
+    version?: string;
+    loaded?: boolean;
+}
+export declare function readModules(body: Record<string, unknown> | undefined): DapModule[];
+/** `setDataBreakpoints` response: verified data breakpoints. */
+export interface DapDataBreakpoint {
+    id?: number;
+    verified: boolean;
+    message?: string;
+}
+export declare function readDataBreakpoints(body: Record<string, unknown> | undefined): DapDataBreakpoint[];
+/** `gotoTargets` response: valid jump targets for `goto`. */
+export interface DapGotoTarget {
+    id: number;
+    label: string;
+    line: number;
+}
+export declare function readGotoTargets(body: Record<string, unknown> | undefined): DapGotoTarget[];
 export declare function readString(value: unknown): string | undefined;
 export declare function readNumber(value: unknown): number | undefined;
 export declare function readBoolean(value: unknown): boolean | undefined;

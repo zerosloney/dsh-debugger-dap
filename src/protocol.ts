@@ -60,6 +60,12 @@ export interface DapCapabilities {
   supportsExceptionOptions?: boolean
   supportsExceptionInfoRequest?: boolean
   supportsTerminateThreadsRequest?: boolean
+  supportsLoadedSourcesRequest?: boolean
+  supportsModulesRequest?: boolean
+  supportsDataBreakpoints?: boolean
+  supportsStepBack?: boolean
+  supportsGotoTargetsRequest?: boolean
+  supportsRestartFrame?: boolean
 }
 
 export function readCapabilities(body: Record<string, unknown> | undefined): DapCapabilities {
@@ -78,6 +84,12 @@ export function readCapabilities(body: Record<string, unknown> | undefined): Dap
     supportsExceptionOptions: readBoolean(record.supportsExceptionOptions),
     supportsExceptionInfoRequest: readBoolean(record.supportsExceptionInfoRequest),
     supportsTerminateThreadsRequest: readBoolean(record.supportsTerminateThreadsRequest),
+    supportsLoadedSourcesRequest: readBoolean(record.supportsLoadedSourcesRequest),
+    supportsModulesRequest: readBoolean(record.supportsModulesRequest),
+    supportsDataBreakpoints: readBoolean(record.supportsDataBreakpoints),
+    supportsStepBack: readBoolean(record.supportsStepBack),
+    supportsGotoTargetsRequest: readBoolean(record.supportsGotoTargetsRequest),
+    supportsRestartFrame: readBoolean(record.supportsRestartFrame),
   }
 }
 
@@ -158,7 +170,7 @@ export function readStackFrames(body: Record<string, unknown> | undefined): DapS
     const record = item as Record<string, unknown>
     const id = readNumber(record.id)
     if (id === undefined) continue
-    const source = readSource(record.source)
+    const source = readSourceRef(record.source)
     frames.push({
       id,
       name: readString(record.name) ?? `frame ${id}`,
@@ -170,7 +182,7 @@ export function readStackFrames(body: Record<string, unknown> | undefined): DapS
   return frames
 }
 
-function readSource(value: unknown): DapSource | undefined {
+function readSourceRef(value: unknown): DapSource | undefined {
   if (value === null || typeof value !== 'object') return undefined
   const record = value as Record<string, unknown>
   return { path: readString(record.path), name: readString(record.name) }
@@ -309,6 +321,111 @@ export function readBreakpoints(body: Record<string, unknown> | undefined): DapB
     })
   }
   return breakpoints
+}
+
+/** `source` response: contents of a source file. */
+export interface DapSourceContent {
+  content: string
+  mimeType?: string
+}
+
+export function readSource(body: Record<string, unknown> | undefined): DapSourceContent {
+  const record = body ?? {}
+  return {
+    content: readString(record.content) ?? '',
+    mimeType: readString(record.mimeType),
+  }
+}
+
+/** `loadedSources` response: all source files currently loaded in the debuggee. */
+export interface DapLoadedSource {
+  path?: string
+  name?: string
+}
+
+export function readLoadedSources(body: Record<string, unknown> | undefined): DapLoadedSource[] {
+  const raw = body?.sources
+  if (!Array.isArray(raw)) return []
+  const sources: DapLoadedSource[] = []
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    sources.push({ path: readString(record.path), name: readString(record.name) })
+  }
+  return sources
+}
+
+/** `modules` response: loaded program modules or shared libraries. */
+export interface DapModule {
+  id: number | string
+  name?: string
+  path?: string
+  version?: string
+  loaded?: boolean
+}
+
+export function readModules(body: Record<string, unknown> | undefined): DapModule[] {
+  const raw = body?.modules
+  if (!Array.isArray(raw)) return []
+  const modules: DapModule[] = []
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    const id = record.id
+    if (id === undefined) continue
+    modules.push({
+      id: typeof id === 'number' || typeof id === 'string' ? id : String(id),
+      name: readString(record.name),
+      path: readString(record.path),
+      version: readString(record.version),
+      loaded: readBoolean(record.loaded),
+    })
+  }
+  return modules
+}
+
+/** `setDataBreakpoints` response: verified data breakpoints. */
+export interface DapDataBreakpoint {
+  id?: number
+  verified: boolean
+  message?: string
+}
+
+export function readDataBreakpoints(body: Record<string, unknown> | undefined): DapDataBreakpoint[] {
+  const raw = body?.breakpoints
+  if (!Array.isArray(raw)) return []
+  const breakpoints: DapDataBreakpoint[] = []
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    breakpoints.push({
+      id: readNumber(record.id),
+      verified: readBoolean(record.verified) ?? false,
+      message: readString(record.message),
+    })
+  }
+  return breakpoints
+}
+
+/** `gotoTargets` response: valid jump targets for `goto`. */
+export interface DapGotoTarget {
+  id: number
+  label: string
+  line: number
+}
+
+export function readGotoTargets(body: Record<string, unknown> | undefined): DapGotoTarget[] {
+  const raw = body?.targets
+  if (!Array.isArray(raw)) return []
+  const targets: DapGotoTarget[] = []
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    const id = readNumber(record.id)
+    if (id === undefined) continue
+    targets.push({ id, label: readString(record.label) ?? `line ${record.line}`, line: readNumber(record.line) ?? 0 })
+  }
+  return targets
 }
 
 // ---- Defensive primitive readers ----

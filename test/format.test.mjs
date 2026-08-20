@@ -73,3 +73,61 @@ test('results are bounded by maxResultChars', () => {
   assert.ok(text.length <= 2000)
   assert.ok(text.includes('truncated (limit 2000'))
 })
+
+test('restart, goto, and restart_frame render the snapshot plus a notice', () => {
+  for (const [action, notice] of [
+    ['restart', 'restarted with the original launch configuration'],
+    ['goto', 'jumped to the requested target'],
+    ['restart_frame', 'stack frame restarted'],
+  ]) {
+    const text = renderDebugText({ action, snapshot: baseSnapshot }, 16000)
+    assert.ok(text.includes('Session dbg-1'), `${action} anchors the snapshot`)
+    assert.ok(text.includes(notice), `${action} explains what happened`)
+  }
+})
+
+test('source renders content with the mime type', () => {
+  const text = renderDebugText(
+    { action: 'source', snapshot: baseSnapshot, content: 'def doWork():\n    pass\n', mime_type: 'text/x-python' },
+    16000,
+  )
+  assert.ok(text.includes('Source (text/x-python):'))
+  assert.ok(text.includes('def doWork():\n    pass'))
+})
+
+test('loaded_sources and modules render lists', () => {
+  const sourcesText = renderDebugText(
+    { action: 'loaded_sources', snapshot: baseSnapshot, sources: [{ path: '/w/a.py' }, { name: 'lib.py' }] },
+    16000,
+  )
+  assert.ok(sourcesText.includes('Loaded sources (2):'))
+  assert.ok(sourcesText.includes('- /w/a.py'))
+  assert.ok(sourcesText.includes('- lib.py'))
+
+  const modulesText = renderDebugText(
+    {
+      action: 'modules',
+      snapshot: baseSnapshot,
+      modules: [{ id: '7', name: 'app', version: '1.0', loaded: true }, { id: '9', name: 'lib', loaded: false }],
+    },
+    16000,
+  )
+  assert.ok(modulesText.includes('Modules (2):'))
+  assert.ok(modulesText.includes('- app v1.0'))
+  assert.ok(modulesText.includes('- lib (unloaded)'))
+})
+
+test('set_data_breakpoints and goto_targets render resolved rows', () => {
+  const dataText = renderDebugText(
+    { action: 'set_data_breakpoints', snapshot: baseSnapshot, breakpoints: [{ id: '3', verified: true }] },
+    16000,
+  )
+  assert.ok(dataText.includes('- data breakpoint 3: verified'))
+
+  const targetsText = renderDebugText(
+    { action: 'goto_targets', snapshot: baseSnapshot, targets: [{ id: 12, label: 'line 88', line: 88 }] },
+    16000,
+  )
+  assert.ok(targetsText.includes('Goto targets (1):'))
+  assert.ok(targetsText.includes('- #12 line 88 @ line 88'))
+})

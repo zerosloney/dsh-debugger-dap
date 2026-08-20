@@ -6,8 +6,15 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { DebugSessionManager, type SessionLimits } from './session.js';
 import { type DebugToolValue } from './format.js';
-export declare const DEBUG_ACTIONS: readonly ["launch", "attach", "set_breakpoints", "set_function_breakpoints", "set_exception_breakpoints", "continue", "step_in", "step_over", "step_out", "pause", "threads", "stack_trace", "scopes", "variables", "evaluate", "set_variable", "set_expression", "exception_info", "output", "disconnect", "sessions"];
+export declare const DEBUG_ACTIONS: readonly ["launch", "attach", "set_breakpoints", "set_function_breakpoints", "set_exception_breakpoints", "continue", "step_in", "step_over", "step_out", "pause", "threads", "stack_trace", "scopes", "variables", "evaluate", "set_variable", "set_expression", "exception_info", "output", "disconnect", "sessions", "restart", "source", "loaded_sources", "modules", "set_data_breakpoints", "goto_targets", "goto", "restart_frame"];
 export type DebugAction = (typeof DEBUG_ACTIONS)[number];
+/**
+ * Actions safe to run in parallel with other tool calls. Everything else is
+ * serialized: debug state is a live state machine (current frame, thread,
+ * stop reason), so only pure reads that do not touch mutable session state
+ * are whitelisted. New actions default to serialized (safe side).
+ */
+export declare const CONCURRENT_SAFE_ACTIONS: ReadonlySet<string>;
 /**
  * Recursively drop `undefined`-valued entries so the returned canonical value
  * satisfies dsh-tools' lossless-JSON output contract. The registry validates
@@ -45,6 +52,17 @@ export interface DebugArgs {
     offset?: number;
     max_chars?: number;
     terminate_debuggee?: boolean;
+    target_line?: number;
+    target_id?: number;
+    data_breakpoints?: Array<{
+        address?: string;
+        name?: string;
+        access_type?: 'read' | 'write' | 'readWrite';
+    }>;
+    access_type?: 'read' | 'write' | 'readWrite';
+    address?: string;
+    watch_name?: string;
+    restart_frame_id?: number;
 }
 /**
  * Execute one debug action against the manager. Split from the defineTool

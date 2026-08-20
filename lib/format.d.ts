@@ -37,7 +37,11 @@ export interface DebugToolValue {
     state?: 'stopped' | 'running' | 'terminated';
     timed_out?: boolean;
     file?: string;
-    breakpoints?: Array<BreakpointRecord | FunctionBreakpointRecord>;
+    breakpoints?: Array<{
+        id: string;
+        verified: boolean;
+        message?: string;
+    } | BreakpointRecord | FunctionBreakpointRecord>;
     frames?: DapFrameView[];
     frames_omitted?: number;
     threads?: ThreadView[];
@@ -69,9 +73,31 @@ export interface DebugToolValue {
         truncated: boolean;
     };
     sessions?: DebugSnapshot[];
+    content?: string;
+    mime_type?: string;
+    sources?: Array<{
+        path?: string;
+        name?: string;
+    }>;
+    modules?: Array<{
+        id: string;
+        name?: string;
+        path?: string;
+        version?: string;
+        loaded?: boolean;
+    }>;
+    targets?: Array<{
+        id: number;
+        label: string;
+        line: number;
+    }>;
 }
 export declare function formatSnapshotLines(snapshot: DebugSnapshot): string[];
-export declare function formatBreakpoints(file: string, breakpoints: Array<BreakpointRecord | FunctionBreakpointRecord>): string[];
+export declare function formatBreakpoints(file: string, breakpoints: Array<{
+    id: string;
+    verified: boolean;
+    message?: string;
+} | BreakpointRecord | FunctionBreakpointRecord>): string[];
 export declare function formatFrames(frames: DapFrameView[], omitted: number): string[];
 export declare function formatThreads(threads: ThreadView[]): string[];
 export declare function formatScopes(scopes: ScopeView[]): string[];

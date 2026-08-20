@@ -1,6 +1,7 @@
 /**
- * Adapter recipes: built-in stdio DAP adapters (debugpy, dlv) plus
- * config-declared rows, resolved against PATH with actionable install hints.
+ * Adapter recipes: built-in DAP adapters (debugpy, dlv, netcoredbg,
+ * lldb-dap, js-debug, codelldb) plus config-declared rows, resolved
+ * against PATH with actionable install hints.
  */
 
 import { delimiter, isAbsolute, join } from 'node:path'
@@ -19,16 +20,28 @@ export interface AdapterSpec {
    * `stopOnEntry`; netcoredbg uses `stopAtEntry`.
    */
   stopOnEntryKey?: string
+  /** Transport layer. Default `'stdio'`; `'tcp'` means the adapter is reached over TCP. */
+  transport?: 'stdio' | 'tcp'
+  /** Target host for `'tcp'` transport (default `'127.0.0.1'`). */
+  host?: string
+  /** Target port for `'tcp'` transport. */
+  port?: number
 }
 
 /** One `adapters` config row. */
 export interface AdapterConfigEntry {
   command: string
-  args?: string[]
+  args?: readonly string[]
   env?: Record<string, string>
   cwd?: string
   /** Extra per-adapter fields spread into the DAP `launch` request body. */
   launchArgs?: Record<string, unknown>
+  /** Transport layer: 'stdio' (default) or 'tcp'. */
+  transport?: 'stdio' | 'tcp'
+  /** TCP connect host (default '127.0.0.1'). Used when transport is 'tcp'. */
+  connectHost?: string
+  /** TCP connect port. Required when transport is 'tcp'. */
+  connectPort?: number
 }
 
 /** A recipe: id, command line, and how to probe availability. */
@@ -44,6 +57,8 @@ export interface AdapterRecipe {
   launchArgs?: Record<string, unknown>
   /** `launch` field that carries the stop-on-entry control (default `stopOnEntry`). */
   stopOnEntryKey?: string
+  /** Transport layer for this recipe: 'stdio' (default) or 'tcp'. */
+  transport?: 'stdio' | 'tcp'
   /** Config row replacing the built-in definition, when present. */
   configOverride?: AdapterConfigEntry
 }
@@ -72,6 +87,31 @@ const BUILT_IN_RECIPES: readonly AdapterRecipe[] = [
     launchArgs: { type: 'coreclr' },
     stopOnEntryKey: 'stopAtEntry',
   },
+  {
+    id: 'lldb-dap',
+    probeCommands: ['lldb-dap'],
+    fixedArgs: [],
+    installHint:
+      "adapter 'lldb-dap' is not available: install the LLVM DAP binary (llvm-dap, lldb-dap, or dap-server depending on your LLVM version) and ensure it is on PATH. On macOS with Xcode, you may need to build from https://llvm.org/git/dap.",
+  },
+  {
+    id: 'js-debug',
+    probeCommands: ['node'],
+    fixedArgs: [],
+    installHint:
+      "adapter 'js-debug' is not available: run 'npm install -g @vscode/js-debug' and ensure 'node' is on PATH. js-debug is also bundled with VS Code and the 'nodedebug' adapter.",
+    launchArgs: { type: 'node' },
+  },
+  {
+    id: 'codelldb',
+    probeCommands: ['codelldb'],
+    fixedArgs: ['dap', '--port', '0'],
+    installHint:
+      "adapter 'codelldb' is not available: install the CodeLLDB extension (https://marketplace.visualstudio.com/items?itemName=vadimcn.vscode-lldb) and ensure the codelldb binary is on PATH, or configure the path in the 'adapters' plugin config.",
+    // codelldb listens on a random high port when started with --port 0;
+    // the actual port is written to stdout as "Listening on port <N>\n".
+    transport: 'tcp',
+  },
 ]
 
 /** Failed adapter resolution with the actionable message to surface. */
@@ -95,7 +135,7 @@ export function resolveAdapter(
     throw new AdapterUnavailableError(
       `No debugger adapter matches '${options.program}'. Pass 'adapter' explicitly (available: ${
         available.length > 0 ? available.join(', ') : 'none'
-      }). Custom stdio adapters are declared in the 'adapters' config.`,
+      }). Custom adapters are declared in the 'adapters' plugin config.`,
     )
   }
   const recipe = recipes.find(entry => entry.id === wanted)
@@ -108,15 +148,19 @@ export function resolveAdapter(
   }
   if (recipe.configOverride !== undefined) {
     const spec = expandConfigEntry(recipe.configOverride)
-    // Inherit the built-in's launch defaults unless the override provides its own;
-    // the stop-on-entry field name remains a recipe property (override changes path/args only).
     spec.launchArgs = recipe.configOverride.launchArgs ?? recipe.launchArgs
     spec.stopOnEntryKey = recipe.stopOnEntryKey ?? 'stopOnEntry'
     return spec
   }
   const command = recipe.probeCommands.find(commandExists)
   if (command === undefined) throw new AdapterUnavailableError(recipe.installHint)
-  return { command, args: recipe.fixedArgs, launchArgs: recipe.launchArgs, stopOnEntryKey: recipe.stopOnEntryKey ?? 'stopOnEntry' }
+  return {
+    command,
+    args: recipe.fixedArgs,
+    launchArgs: recipe.launchArgs,
+    stopOnEntryKey: recipe.stopOnEntryKey ?? 'stopOnEntry',
+    transport: recipe.transport,
+  }
 }
 
 function mergeRecipes(adapterConfig: Record<string, AdapterConfigEntry> | undefined): AdapterRecipe[] {
@@ -139,14 +183,25 @@ function mergeRecipes(adapterConfig: Record<string, AdapterConfigEntry> | undefi
 }
 
 function expandConfigEntry(entry: AdapterConfigEntry): AdapterSpec {
-  return { command: entry.command, args: entry.args ?? [], env: entry.env, cwd: entry.cwd, launchArgs: entry.launchArgs }
+  return {
+    command: entry.command,
+    args: entry.args ?? ([] as readonly string[]),
+    env: entry.env,
+    cwd: entry.cwd,
+    launchArgs: entry.launchArgs,
+    transport: entry.transport,
+    host: entry.connectHost,
+    port: entry.connectPort,
+  }
 }
 
 function guessAdapterId(program: string): string | undefined {
   if (program.endsWith('.py')) return 'debugpy'
   if (program.endsWith('.go')) return 'dlv'
-  // A compiled .NET assembly (dll) or an apphost exe launches under netcoredbg.
   if (program.endsWith('.dll') || program.endsWith('.exe')) return 'netcoredbg'
+  if (program.endsWith('.c') || program.endsWith('.cpp') || program.endsWith('.cxx') || program.endsWith('.h') || program.endsWith('.hpp')) return 'lldb-dap'
+  if (program.endsWith('.rs')) return 'codelldb'
+  if (program.endsWith('.js') || program.endsWith('.mjs') || program.endsWith('.cjs') || program.endsWith('.ts') || program.endsWith('.mts') || program.endsWith('.cts')) return 'js-debug'
   return undefined
 }
 

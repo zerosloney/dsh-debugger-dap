@@ -9,20 +9,30 @@ import { DapConnection, DapDisconnectedError, type SpawnedAdapter } from './conn
 import {
   readBreakpoints,
   readCapabilities,
+  readDataBreakpoints,
   readEvaluation,
   readExceptionInfo,
   readExitCode,
+  readGotoTargets,
+  readLoadedSources,
+  readModules,
   readOutputEvent,
   readScopes,
   readSetResult,
+  readSource,
   readStackFrames,
   readStoppedEvent,
   readThreads,
   readVariables,
   type DapCapabilities,
+  type DapDataBreakpoint,
   type DapExceptionInfo,
+  type DapGotoTarget,
+  type DapLoadedSource,
+  type DapModule,
   type DapScope,
   type DapSetResult,
+  type DapSourceContent,
   type DapStackFrame,
   type DapThread,
   type DapVariable,
@@ -52,7 +62,6 @@ export interface DebugSnapshot {
   threadId?: number
   frame?: { id: number; name: string; path?: string; line: number; column: number }
   exitCode?: number
-  /** Breakpoints set before `configurationDone` still apply at launch. */
   configuring: boolean
   outputChars: number
 }
@@ -75,9 +84,7 @@ export interface StepOutcome {
 /** Page of captured debuggee output. */
 export interface OutputPage {
   text: string
-  /** Char offset the returned text starts at. */
   offset: number
-  /** Total chars captured since launch (evicted chars included). */
   totalChars: number
   truncated: boolean
 }
@@ -91,7 +98,8 @@ export class DebugError extends Error {
       | 'foreign_session'
       | 'not_stopped'
       | 'no_thread'
-      | 'invalid_arguments',
+      | 'invalid_arguments'
+      | 'not_supported',
     message: string,
   ) {
     super(message)
@@ -99,8 +107,7 @@ export class DebugError extends Error {
   }
 }
 
-/** Spawn hook, injectable for tests. */
-export type SpawnAdapterFn = (spec: AdapterSpec) => SpawnedAdapter
+export type SpawnAdapterFn = (spec: AdapterSpec) => SpawnedAdapter | Promise<SpawnedAdapter>
 
 interface StopWaiter {
   resolve: (state: 'stopped' | 'terminated') => void
@@ -140,12 +147,10 @@ export class DebugSession {
     return this.spawned.connection
   }
 
-  /** Record the launch cwd for snapshots. */
   noteCwd(cwd: string | undefined): void {
     this.cwdValue = cwd
   }
 
-  /** Wire all event folds; must run before {@link launch} or {@link attach}. */
   wireEvents(): void {
     const { connection } = this
     this.detach.push(
@@ -184,16 +189,6 @@ export class DebugSession {
     )
   }
 
-  /**
-   * Full DAP launch handshake: initialize → launch → wait `initialized` →
-   * `configurationDone` → optionally wait the entry stop. Enriches adapter
-   * exit failures with the adapter's stderr tail.
-   */
-  /**
-   * Shared DAP start handshake: initialize → (launch|attach) → wait `initialized`
-   * → `configurationDone` → optionally wait the entry/attach stop. Enriches
-   * adapter exit failures with the adapter's stderr tail.
-   */
   private async start(
     mode: 'launch' | 'attach',
     body: Record<string, unknown>,
@@ -216,8 +211,6 @@ export class DebugSession {
       )
       this.capabilities = { ...this.capabilities, ...readCapabilities(initBody) }
       await this.connection.send(mode, body, { signal })
-      // The adapter emits `initialized` once it accepted the request and is
-      // ready for breakpoint configuration; only then may configurationDone follow.
       if (!this.initializedSeen) {
         await this.waitForEvent('initialized', this.limits.requestTimeoutMs, signal)
       }
@@ -237,7 +230,6 @@ export class DebugSession {
     }
   }
 
-  /** Launch a program under the adapter, optionally stopping at entry. */
   async launch(
     options: {
       args?: readonly string[]
@@ -257,10 +249,7 @@ export class DebugSession {
         program: this.program,
         args: options.args ?? [],
         cwd: options.cwd,
-        // Most adapters take `stopOnEntry`; netcoredbg uses `stopAtEntry`.
         [stopKey]: options.stopOnEntry,
-        // Config-declared per-adapter overrides; recipe launchArgs (e.g. netcoredbg's
-        // `type: coreclr`) spread last so they win.
         ...options.launchArgs,
       },
       options.stopOnEntry,
@@ -269,7 +258,6 @@ export class DebugSession {
     )
   }
 
-  /** Attach to an already-running process by pid. */
   async attach(
     options: {
       processId: number
@@ -298,7 +286,6 @@ export class DebugSession {
     )
   }
 
-  /** Replace one file's breakpoint set; DAP setBreakpoints is per-source replace-all. */
   async setBreakpoints(
     file: string,
     lines: readonly { line: number; condition?: string; hitCondition?: string; logMessage?: string }[],
@@ -332,7 +319,6 @@ export class DebugSession {
     return records
   }
 
-  /** Continue or step; resolves at the next stop, termination, or deadline. */
   async resume(
     action: 'continue' | 'next' | 'stepIn' | 'stepOut' | 'pause',
     signal?: AbortSignal,
@@ -356,18 +342,15 @@ export class DebugSession {
     }
   }
 
-  /** Fresh status read; defeats unsound property narrowing across awaits. */
   private readStatus(): DebugStatus {
     return this.status
   }
 
-  /** List debuggee threads. */
   async threads(signal?: AbortSignal): Promise<DapThread[]> {
     const body = await this.connection.send('threads', undefined, { signal })
     return readThreads(body)
   }
 
-  /** Stack frames for one thread, bounded by `maxStackFrames`. */
   async stackTrace(levels: number, signal?: AbortSignal): Promise<DapFrameView[]> {
     const threadId = await this.resolveThreadId(signal)
     const body = await this.connection.send(
@@ -380,7 +363,6 @@ export class DebugSession {
     return frames.map(frame => toFrameView(frame))
   }
 
-  /** Scopes for one frame; defaults to the current stop location's top frame. */
   async scopes(frameId: number | undefined, signal?: AbortSignal): Promise<DapScope[]> {
     const resolved = frameId ?? this.currentFrame?.id
     if (resolved === undefined) {
@@ -390,7 +372,6 @@ export class DebugSession {
     return readScopes(body)
   }
 
-  /** Variables for one reference, bounded by `maxVariables`. */
   async variables(variablesReference: number, signal?: AbortSignal): Promise<{ variables: DapVariable[]; omitted: number }> {
     const body = await this.connection.send('variables', { variablesReference }, { signal })
     const all = readVariables(body)
@@ -398,7 +379,6 @@ export class DebugSession {
     return { variables: shown, omitted: all.length - shown.length }
   }
 
-  /** Evaluate one expression in a frame context. */
   async evaluate(
     expression: string,
     frameId: number | undefined,
@@ -414,18 +394,11 @@ export class DebugSession {
     return readEvaluation(body)
   }
 
-  /** Set one variable under a variablesReference. */
-  async setVariable(
-    variablesReference: number,
-    name: string,
-    value: string,
-    signal?: AbortSignal,
-  ): Promise<DapSetResult> {
+  async setVariable(variablesReference: number, name: string, value: string, signal?: AbortSignal): Promise<DapSetResult> {
     const body = await this.connection.send('setVariable', { variablesReference, name, value }, { signal })
     return readSetResult(body)
   }
 
-  /** Assign an expression in a frame context. */
   async setExpression(
     expression: string,
     value: string,
@@ -442,7 +415,6 @@ export class DebugSession {
     return readSetResult(body)
   }
 
-  /** Replace the function-breakpoint set (name/condition/hitCondition). */
   async setFunctionBreakpoints(
     functions: readonly { name: string; condition?: string; hitCondition?: string }[],
     signal?: AbortSignal,
@@ -461,28 +433,17 @@ export class DebugSession {
     const resolved = readBreakpoints(body)
     return functions.map((entry, index) => {
       const adapter = resolved[index]
-      return {
-        name: entry.name,
-        verified: adapter?.verified ?? false,
-        line: adapter?.line,
-        message: adapter?.message,
-      }
+      return { name: entry.name, verified: adapter?.verified ?? false, line: adapter?.line, message: adapter?.message }
     })
   }
 
-  /** Configure which exceptions break. Uses `filterOptions` when supported. */
-  async setExceptionBreakpoints(
-    filters: readonly string[],
-    filterOptions: unknown[] | undefined,
-    signal?: AbortSignal,
-  ): Promise<void> {
+  async setExceptionBreakpoints(filters: readonly string[], filterOptions: unknown[] | undefined, signal?: AbortSignal): Promise<void> {
     const body: Record<string, unknown> = filterOptions !== undefined && this.capabilities.supportsExceptionOptions
       ? { filterOptions }
       : { filters: [...filters] }
     await this.connection.send('setExceptionBreakpoints', body, { signal })
   }
 
-  /** Fetch details of the exception that caused the current stop. */
   async exceptionInfo(threadId: number | undefined, signal?: AbortSignal): Promise<DapExceptionInfo> {
     const resolved = threadId ?? this.activeThreadId
     if (resolved === undefined) {
@@ -492,7 +453,101 @@ export class DebugSession {
     return readExceptionInfo(body)
   }
 
-  /** Read a page of captured debuggee output. */
+  async restart(signal?: AbortSignal): Promise<DebugSnapshot> {
+    if (this.capabilities.supportsRestartRequest !== true) {
+      throw new DebugError('not_supported', "The adapter does not support 'restart'. Upgrade the debugger or launch again.")
+    }
+    await this.connection.send('restart', undefined, { signal })
+    this.status = 'running'
+    this.stopReason = undefined
+    this.activeThreadId = undefined
+    this.currentFrame = undefined
+    const state = await this.waitForStop(this.limits.stepTimeoutMs, signal)
+    if (state === 'stopped') await this.refreshLocation(signal)
+    return this.snapshot()
+  }
+
+  async source(signal?: AbortSignal): Promise<DapSourceContent> {
+    const frame = this.currentFrame
+    if (frame === undefined || frame.source?.path === undefined) {
+      throw new DebugError('not_stopped', 'No current frame with a source path: stop at a breakpoint first.')
+    }
+    const body = await this.connection.send('source', { source: { path: frame.source.path }, sourceReference: 0 }, { signal })
+    return readSource(body)
+  }
+
+  async loadedSources(signal?: AbortSignal): Promise<DapLoadedSource[]> {
+    if (this.capabilities.supportsLoadedSourcesRequest !== true) {
+      throw new DebugError('not_supported', "The adapter does not support 'loadedSources'.")
+    }
+    const body = await this.connection.send('loadedSources', undefined, { signal })
+    return readLoadedSources(body)
+  }
+
+  async modules(signal?: AbortSignal): Promise<DapModule[]> {
+    if (this.capabilities.supportsModulesRequest !== true) {
+      throw new DebugError('not_supported', "The adapter does not support 'modules'.")
+    }
+    const body = await this.connection.send('modules', undefined, { signal })
+    return readModules(body)
+  }
+
+  async setDataBreakpoints(
+    breakpoints: readonly { address?: string; name?: string; accessType?: 'read' | 'write' | 'readWrite' }[],
+    signal?: AbortSignal,
+  ): Promise<DapDataBreakpoint[]> {
+    if (this.capabilities.supportsDataBreakpoints !== true) {
+      throw new DebugError('not_supported', "The adapter does not support 'setDataBreakpoints'.")
+    }
+    const body = await this.connection.send(
+      'setDataBreakpoints',
+      {
+        breakpoints: breakpoints.map(bp => ({
+          ...(bp.address !== undefined ? { address: bp.address } : {}),
+          ...(bp.name !== undefined ? { name: bp.name } : {}),
+          ...(bp.accessType !== undefined ? { accessType: bp.accessType } : {}),
+        })),
+      },
+      { signal },
+    )
+    return readDataBreakpoints(body)
+  }
+
+  async gotoTargets(targetLine: number, signal?: AbortSignal): Promise<DapGotoTarget[]> {
+    const frame = this.currentFrame
+    if (frame === undefined || frame.source?.path === undefined) {
+      throw new DebugError('not_stopped', 'No current frame with a source path: stop at a breakpoint first.')
+    }
+    if (this.capabilities.supportsGotoTargetsRequest !== true) {
+      throw new DebugError('not_supported', "The adapter does not support 'gotoTargets'.")
+    }
+    const body = await this.connection.send('gotoTargets', { source: { path: frame.source.path }, line: targetLine }, { signal })
+    return readGotoTargets(body)
+  }
+
+  async goto(targetId: number, signal?: AbortSignal): Promise<DebugSnapshot> {
+    if (this.capabilities.supportsGotoTargetsRequest !== true) {
+      throw new DebugError('not_supported', "The adapter does not support 'goto'.")
+    }
+    await this.connection.send('goto', { targetId }, { signal })
+    this.status = 'running'
+    this.stopReason = undefined
+    const state = await this.waitForStop(this.limits.stepTimeoutMs, signal)
+    if (state === 'stopped') await this.refreshLocation(signal)
+    return this.snapshot()
+  }
+
+  async restartFrame(frameId: number | undefined, signal?: AbortSignal): Promise<void> {
+    if (this.capabilities.supportsRestartFrame !== true) {
+      throw new DebugError('not_supported', "The adapter does not support 'restartFrame'.")
+    }
+    const resolved = frameId ?? this.currentFrame?.id
+    if (resolved === undefined) {
+      throw new DebugError('not_stopped', 'No current frame: stop at a breakpoint first or pass frame_id.')
+    }
+    await this.connection.send('restartFrame', { frameId: resolved }, { signal })
+  }
+
   readOutput(request?: { offset?: number; maxChars?: number }): OutputPage {
     const maxChars = Math.max(200, Math.min(request?.maxChars ?? 4000, this.limits.maxOutputChars))
     const wanted = request?.offset ?? Math.max(0, this.outputChars - maxChars)
@@ -517,7 +572,6 @@ export class DebugSession {
     return { text, offset: start, totalChars: this.outputChars, truncated: truncatedByEviction }
   }
 
-  /** Snapshot of the current session state. */
   snapshot(): DebugSnapshot {
     const frame = this.currentFrame
     return {
@@ -538,7 +592,6 @@ export class DebugSession {
     }
   }
 
-  /** Graceful disconnect then hard kill; idempotent. */
   async disconnect(terminateDebuggee: boolean): Promise<void> {
     if (this.disposed) return
     this.disposed = true
@@ -620,13 +673,13 @@ export class DebugSession {
     return new Promise<'stopped' | 'terminated' | 'running'>((resolve, reject) => {
       const onAbort = () => {
         this.stopWaiter = undefined
-        if (waiter.timer !== undefined) clearTimeout(waiter.timer)
+        clearTimeout(waiter.timer)
         reject(new Error('Aborted while waiting for the debuggee to stop'))
       }
       const waiter: StopWaiter = {
         resolve: state => {
           this.stopWaiter = undefined
-          if (waiter.timer !== undefined) clearTimeout(waiter.timer)
+          clearTimeout(waiter.timer)
           signal?.removeEventListener('abort', onAbort)
           resolve(state)
         },
@@ -634,7 +687,6 @@ export class DebugSession {
         onAbort,
       }
       waiter.timer = setTimeout(() => {
-        // Deadline: stop waiting but keep the session; the debuggee keeps running.
         this.stopWaiter = undefined
         signal?.removeEventListener('abort', onAbort)
         resolve(this.status === 'terminated' ? 'terminated' : 'running')
@@ -715,11 +767,11 @@ export class DebugSessionManager {
     },
   ) {}
 
-  /** Spawn one adapter, run the launch handshake, and register the session. */
   async launch(owner: object, request: ManagerLaunchRequest, signal?: AbortSignal): Promise<DebugSnapshot> {
     const spec = this.deps.resolveAdapter({ adapter: request.adapterId, program: request.program })
     const id = `dbg-${this.nextId++}`
-    const session = new DebugSession(id, spec.command, request.program, this.deps.spawn(spec), this.deps.limits)
+    const spawned = await this.deps.spawn(spec)
+    const session = new DebugSession(id, spec.command, request.program, spawned, this.deps.limits)
     session.noteCwd(request.cwd)
     session.wireEvents()
     this.sessions.set(id, { session, owner })
@@ -741,11 +793,11 @@ export class DebugSessionManager {
     }
   }
 
-  /** Spawn one adapter, run the attach handshake, and register the session. */
   async attach(owner: object, request: ManagerAttachRequest, signal?: AbortSignal): Promise<DebugSnapshot> {
     const spec = this.deps.resolveAdapter({ adapter: request.adapterId, program: request.program ?? '' })
     const id = `dbg-${this.nextId++}`
-    const session = new DebugSession(id, spec.command, request.program ?? `pid:${request.processId}`, this.deps.spawn(spec), this.deps.limits)
+    const spawned = await this.deps.spawn(spec)
+    const session = new DebugSession(id, spec.command, request.program ?? `pid:${request.processId}`, spawned, this.deps.limits)
     session.noteCwd(request.cwd)
     session.wireEvents()
     this.sessions.set(id, { session, owner })
@@ -768,7 +820,6 @@ export class DebugSessionManager {
     }
   }
 
-  /** Resolve the owner's active session or the explicit id; enforces ownership. */
   sessionFor(owner: object, id?: string): DebugSession {
     let record: { session: DebugSession; owner: object } | undefined
     if (id !== undefined) {
@@ -788,12 +839,10 @@ export class DebugSessionManager {
     return record.session
   }
 
-  /** Snapshots of every session the owner still holds. */
   list(owner: object): DebugSnapshot[] {
     return [...this.sessions.values()].filter(record => record.owner === owner).map(record => record.session.snapshot())
   }
 
-  /** Disconnect one (default: active) session. */
   async disconnect(owner: object, id: string | undefined, terminateDebuggee: boolean): Promise<DebugSnapshot | undefined> {
     const session = id === undefined ? this.tryActive(owner) : this.sessionFor(owner, id)
     if (session === undefined) return undefined
@@ -803,7 +852,6 @@ export class DebugSessionManager {
     return snapshot
   }
 
-  /** Tear down every session; the plugin-unload path. */
   async disposeAll(): Promise<void> {
     const pending = [...this.sessions.values()].map(record => record.session.disconnect(false))
     this.sessions.clear()
