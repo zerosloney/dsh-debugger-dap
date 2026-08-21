@@ -78,3 +78,21 @@ test('spawnAdapter tcp-with-port connects directly to a listening server', async
     server.close()
   }
 })
+
+test('send rejects immediately when passed an already-aborted signal', async () => {
+  const spawned = await spawnTcpAdapterWithDiscovery([process.execPath, '-e', echoAdapterScript], {
+    discoveryTimeoutMs: 5000,
+    requestTimeoutMs: 5000,
+  })
+  try {
+    const controller = new AbortController()
+    controller.abort()
+    await assert.rejects(
+      spawned.connection.send('initialize', undefined, { signal: controller.signal }),
+      /DAP initialize aborted/,
+    )
+  } finally {
+    await spawned.kill()
+  }
+})
+

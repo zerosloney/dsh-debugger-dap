@@ -214,10 +214,13 @@ export class DebugSession {
       if (!this.initializedSeen) {
         await this.waitForEvent('initialized', this.limits.requestTimeoutMs, signal)
       }
-      await this.finishConfiguration(signal)
       if (stopOnEntry) {
-        await this.waitForStop(this.limits.requestTimeoutMs, signal)
-        if (this.readStatus() === 'stopped') await this.refreshLocation(signal)
+        const stopPromise = this.waitForStop(this.limits.requestTimeoutMs, signal)
+        await this.finishConfiguration(signal)
+        const state = await stopPromise
+        if (state === 'stopped' && this.readStatus() === 'stopped') await this.refreshLocation(signal)
+      } else {
+        await this.finishConfiguration(signal)
       }
       return this.snapshot()
     } catch (error) {
@@ -328,10 +331,11 @@ export class DebugSession {
     }
     await this.finishConfiguration(signal)
     const threadId = await this.resolveThreadId(signal)
-    await this.connection.send(action, { threadId }, { signal })
     if (action !== 'pause') this.status = 'running'
     const timeoutMs = action === 'pause' ? this.limits.requestTimeoutMs : this.limits.stepTimeoutMs
-    const state = await this.waitForStop(timeoutMs, signal)
+    const stopPromise = this.waitForStop(timeoutMs, signal)
+    await this.connection.send(action, { threadId }, { signal })
+    const state = await stopPromise
     const finalStatus = this.readStatus()
     const timedOut = state === 'stopped' ? false : finalStatus !== 'terminated'
     if (state === 'stopped') await this.refreshLocation(signal)
@@ -457,12 +461,13 @@ export class DebugSession {
     if (this.capabilities.supportsRestartRequest !== true) {
       throw new DebugError('not_supported', "The adapter does not support 'restart'. Upgrade the debugger or launch again.")
     }
-    await this.connection.send('restart', undefined, { signal })
     this.status = 'running'
     this.stopReason = undefined
     this.activeThreadId = undefined
     this.currentFrame = undefined
-    const state = await this.waitForStop(this.limits.stepTimeoutMs, signal)
+    const stopPromise = this.waitForStop(this.limits.stepTimeoutMs, signal)
+    await this.connection.send('restart', undefined, { signal })
+    const state = await stopPromise
     if (state === 'stopped') await this.refreshLocation(signal)
     return this.snapshot()
   }
@@ -529,10 +534,11 @@ export class DebugSession {
     if (this.capabilities.supportsGotoTargetsRequest !== true) {
       throw new DebugError('not_supported', "The adapter does not support 'goto'.")
     }
-    await this.connection.send('goto', { targetId }, { signal })
     this.status = 'running'
     this.stopReason = undefined
-    const state = await this.waitForStop(this.limits.stepTimeoutMs, signal)
+    const stopPromise = this.waitForStop(this.limits.stepTimeoutMs, signal)
+    await this.connection.send('goto', { targetId }, { signal })
+    const state = await stopPromise
     if (state === 'stopped') await this.refreshLocation(signal)
     return this.snapshot()
   }
@@ -643,6 +649,7 @@ export class DebugSession {
   }
 
   private waitForEvent(event: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(new Error(`Aborted while waiting for the ${event} event`))
     return new Promise<void>((resolve, reject) => {
       const unsubscribe = this.connection.onEvent(event, () => {
         cleanup()
@@ -670,6 +677,7 @@ export class DebugSession {
   private waitForStop(timeoutMs: number, signal?: AbortSignal): Promise<'stopped' | 'terminated' | 'running'> {
     if (this.status === 'stopped') return Promise.resolve('stopped')
     if (this.status === 'terminated') return Promise.resolve('terminated')
+    if (signal?.aborted) return Promise.reject(new Error('Aborted while waiting for the debuggee to stop'))
     return new Promise<'stopped' | 'terminated' | 'running'>((resolve, reject) => {
       const onAbort = () => {
         this.stopWaiter = undefined

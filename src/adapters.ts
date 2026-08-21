@@ -196,12 +196,13 @@ function expandConfigEntry(entry: AdapterConfigEntry): AdapterSpec {
 }
 
 function guessAdapterId(program: string): string | undefined {
-  if (program.endsWith('.py')) return 'debugpy'
-  if (program.endsWith('.go')) return 'dlv'
-  if (program.endsWith('.dll') || program.endsWith('.exe')) return 'netcoredbg'
-  if (program.endsWith('.c') || program.endsWith('.cpp') || program.endsWith('.cxx') || program.endsWith('.h') || program.endsWith('.hpp')) return 'lldb-dap'
-  if (program.endsWith('.rs')) return 'codelldb'
-  if (program.endsWith('.js') || program.endsWith('.mjs') || program.endsWith('.cjs') || program.endsWith('.ts') || program.endsWith('.mts') || program.endsWith('.cts')) return 'js-debug'
+  const lower = program.toLowerCase()
+  if (lower.endsWith('.py')) return 'debugpy'
+  if (lower.endsWith('.go')) return 'dlv'
+  if (lower.endsWith('.dll') || lower.endsWith('.exe')) return 'netcoredbg'
+  if (lower.endsWith('.c') || lower.endsWith('.cpp') || lower.endsWith('.cxx') || lower.endsWith('.h') || lower.endsWith('.hpp')) return 'lldb-dap'
+  if (lower.endsWith('.rs')) return 'codelldb'
+  if (lower.endsWith('.js') || lower.endsWith('.mjs') || lower.endsWith('.cjs') || lower.endsWith('.ts') || lower.endsWith('.mts') || lower.endsWith('.cts')) return 'js-debug'
   return undefined
 }
 

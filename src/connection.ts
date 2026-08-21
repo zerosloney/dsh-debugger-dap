@@ -87,6 +87,7 @@ export class DapConnection {
     options?: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<Record<string, unknown>> {
     if (this.closed) return Promise.reject(new DapDisconnectedError(this.closeReason))
+    if (options?.signal?.aborted) return Promise.reject(new Error(`DAP ${command} aborted`))
     const seq = ++this.seq
     const timeoutMs = options?.timeoutMs ?? this.requestTimeoutMs
     return new Promise<Record<string, unknown>>((resolve, reject) => {
@@ -175,7 +176,15 @@ export class DapConnection {
     if (pending.timer !== undefined) clearTimeout(pending.timer)
     detachAbort(pending)
     if (response.success === true) pending.resolve(response.body ?? {})
-    else pending.reject(new DapRequestError(response.command ?? `#${seq}`, response.message))
+    else {
+      const bodyError = response.body?.error as Record<string, unknown> | undefined
+      const msg =
+        response.message ??
+        (typeof bodyError?.format === 'string' ? bodyError.format : undefined) ??
+        (typeof bodyError?.message === 'string' ? bodyError.message : undefined) ??
+        (typeof response.body?.message === 'string' ? response.body.message : undefined)
+      pending.reject(new DapRequestError(response.command ?? `#${seq}`, msg))
+    }
   }
 
   private shutdown(reason: string): void {

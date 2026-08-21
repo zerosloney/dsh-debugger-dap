@@ -64,6 +64,27 @@ test('continue resolves stopped at the next breakpoint location', async () => {
   await manager.disposeAll()
 })
 
+test('continue handles immediate synchronous stopped event without timing out', async () => {
+  const script = standardScript({
+    continue: (server, request) => {
+      // Emit stopped immediately before responding to continue
+      server.emit('stopped', { reason: 'breakpoint', threadId: 1 })
+      server.respond(request.seq, 'continue', { allThreadsContinued: false })
+    },
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py', stopOnEntry: false })
+  const session = manager.sessionFor(owner)
+  const outcome = await session.resume('continue')
+  assert.equal(outcome.state, 'stopped')
+  assert.equal(outcome.timedOut, false)
+  assert.equal(outcome.snapshot.stopReason, 'breakpoint')
+  assert.equal(outcome.snapshot.frame?.line, 42)
+  await manager.disposeAll()
+})
+
+
 test('continue past the wait deadline reports running without killing the session', async () => {
   // continue responds but never emits stopped: the step deadline governs.
   const script = standardScript({ continue: (server, request) => server.respond(request.seq, 'continue') })
