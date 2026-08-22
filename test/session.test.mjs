@@ -37,6 +37,63 @@ test('launch handshake orders initialize → launch → initialized → configur
   await manager.disposeAll()
 })
 
+test('deferred start response (debugpy-style) resolves after configurationDone', async () => {
+  // debugpy answers `launch` only once `configurationDone` has arrived
+  // (launch → initialized → configurationDone → launch response). The
+  // manager must not deadlock waiting for the start response first.
+  const pendingLaunch = []
+  const script = standardScript({
+    launch: (server, request) => {
+      pendingLaunch.push({ server, seq: request.seq })
+      server.emit('initialized')
+      if (request.arguments?.stopOnEntry !== false) {
+        server.emit('stopped', { reason: 'entry', threadId: 1 })
+      }
+    },
+    configurationDone: (server, request) => {
+      server.respond(request.seq, 'configurationDone')
+      for (const pending of pendingLaunch.splice(0)) {
+        pending.server.respond(pending.seq, 'launch')
+      }
+    },
+  })
+  const { manager, fake } = buildManager(script)
+  const owner = {}
+  const snapshot = await manager.launch(owner, { program: '/w/app.py' })
+  assert.equal(snapshot.status, 'stopped')
+  assert.equal(snapshot.stopReason, 'entry')
+  assert.deepEqual(
+    fake.server.received.map(request => request.command),
+    ['initialize', 'launch', 'configurationDone', 'stackTrace'],
+  )
+  // configurationDone must be sent before the start response is awaited:
+  // the adapter would never have answered launch otherwise.
+  const commands = fake.server.received.map(request => request.command)
+  assert.ok(commands.indexOf('launch') < commands.indexOf('configurationDone'))
+  await manager.disposeAll()
+})
+
+test('deferred start response with stopOnEntry=false reports running', async () => {
+  const pendingLaunch = []
+  const script = standardScript({
+    launch: (server, request) => {
+      pendingLaunch.push({ server, seq: request.seq })
+      server.emit('initialized')
+    },
+    configurationDone: (server, request) => {
+      server.respond(request.seq, 'configurationDone')
+      for (const pending of pendingLaunch.splice(0)) {
+        pending.server.respond(pending.seq, 'launch')
+      }
+    },
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  const snapshot = await manager.launch(owner, { program: '/w/app.py', stopOnEntry: false })
+  assert.equal(snapshot.status, 'running')
+  await manager.disposeAll()
+})
+
 test('launch without stopOnEntry reports running', async () => {
   const { manager } = buildManager(standardScript())
   const owner = {}
@@ -115,6 +172,69 @@ test('terminated event ends the wait with exit code', async () => {
   const outcome = await manager.sessionFor(owner).resume('continue')
   assert.equal(outcome.state, 'terminated')
   assert.equal(outcome.snapshot.exitCode, 0)
+  await manager.disposeAll()
+})
+
+test('resume right after an unnoticed exit names the exit instead of missing threads', async () => {
+  // The debuggee finished while the tool call was in flight and the
+  // `terminated` event has not folded yet: the adapter answers `threads`
+  // with an empty list. The error must name the exit (and its code), not a
+  // bare "no threads".
+  const script = standardScript({
+    launch: (server, request) => {
+      server.respond(request.seq, 'launch')
+      server.emit('initialized')
+      setTimeout(() => {
+        server.emit('exited', { exitCode: 7 })
+        server.emit('terminated')
+      }, 20)
+    },
+    threads: (server, request) => server.respond(request.seq, 'threads', { threads: [] }),
+    continue: (server, request) => server.respond(request.seq, 'continue'),
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py', stopOnEntry: false })
+  await assert.rejects(
+    manager.sessionFor(owner).resume('continue'),
+    error => {
+      assert.ok(error instanceof DebugError)
+      assert.equal(error.code, 'no_thread')
+      assert.match(error.message, /already exited/)
+      assert.match(error.message, /Exit code 7/)
+      return true
+    },
+  )
+  await manager.disposeAll()
+})
+
+test('resume after an exit surfaces the exit when the adapter fails threads outright', async () => {
+  // netcoredbg-style: `threads` fails with an opaque adapter error while the
+  // debuggee is exiting; the folded termination must win over that raw error.
+  const script = standardScript({
+    launch: (server, request) => {
+      server.respond(request.seq, 'launch')
+      server.emit('initialized')
+      setTimeout(() => {
+        server.emit('exited', { exitCode: 3 })
+        server.emit('terminated')
+      }, 20)
+    },
+    threads: (server, request) => server.fail(request.seq, 'threads', "Failed command 'threads' : 0x80004005"),
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py', stopOnEntry: false })
+  await assert.rejects(
+    manager.sessionFor(owner).resume('continue'),
+    error => {
+      assert.ok(error instanceof DebugError)
+      assert.equal(error.code, 'no_thread')
+      assert.match(error.message, /already exited/)
+      assert.match(error.message, /Exit code 3/)
+      return true
+    },
+  )
   await manager.disposeAll()
 })
 

@@ -210,17 +210,40 @@ export class DebugSession {
         { signal },
       )
       this.capabilities = { ...this.capabilities, ...readCapabilities(initBody) }
-      await this.connection.send(mode, body, { signal })
+      // DAP start orchestration: `launch`/`attach` is sent first, but
+      // spec-conforming adapters (debugpy) defer the start response until
+      // `configurationDone` arrives (launch → initialized → configurationDone
+      // → start response). Awaiting the start response before configuration
+      // deadlocks those adapters, so wait for `initialized`, finish
+      // configuration, and only then await the start response. Adapters that
+      // answer immediately are unaffected: the response is just awaited later.
+      // A failed start (error response) must surface right away rather than
+      // wait for an `initialized` event that will never come.
+      const startResponse = this.connection.send(mode, body, { signal })
+      const startOutcome = startResponse.then(
+        () => 'start-ok' as const,
+        (error: unknown) => ({ error }),
+      )
       if (!this.initializedSeen) {
-        await this.waitForEvent('initialized', this.limits.requestTimeoutMs, signal)
+        const initialized = this.waitForEvent('initialized', this.limits.requestTimeoutMs, signal)
+          .then(() => 'initialized' as const)
+        const raced = await Promise.race([initialized, startOutcome])
+        if (raced !== 'initialized' && raced !== 'start-ok') throw raced.error
+        // The start succeeded before `initialized` arrived (immediate
+        // adapters): keep waiting for `initialized` before configuration.
+        if (raced === 'start-ok') await initialized
       }
       if (stopOnEntry) {
+        // Register the entry-stop waiter before configurationDone so a stop
+        // that lands while the request is in flight is never missed.
         const stopPromise = this.waitForStop(this.limits.requestTimeoutMs, signal)
         await this.finishConfiguration(signal)
+        await startResponse
         const state = await stopPromise
         if (state === 'stopped' && this.readStatus() === 'stopped') await this.refreshLocation(signal)
       } else {
         await this.finishConfiguration(signal)
+        await startResponse
       }
       return this.snapshot()
     } catch (error) {
@@ -627,11 +650,54 @@ export class DebugSession {
 
   private async resolveThreadId(signal?: AbortSignal): Promise<number> {
     if (this.activeThreadId !== undefined) return this.activeThreadId
-    const threads = await this.threads(signal)
+    let threads: DapThread[]
+    try {
+      threads = await this.threads(signal)
+    } catch (error) {
+      // The debuggee may have just exited: some adapters fail `threads`
+      // outright (netcoredbg answers 0x80004005) before the terminated event
+      // folds. Give the exit a brief window to land so the failure names it
+      // instead of surfacing the raw adapter error.
+      if (this.status === 'stopped') throw error
+      if (this.status === 'terminated') throw this.exitedError()
+      await this.waitForStop(Math.min(this.limits.stepTimeoutMs, 500), signal)
+      // readStatus() defeats property narrowing: the wait above may have
+      // folded a termination even though earlier guards excluded it.
+      if (this.readStatus() === 'terminated') throw this.exitedError()
+      throw error
+    }
+    if (threads.length > 0) {
+      this.activeThreadId = threads[0].id
+      return this.activeThreadId
+    }
+    // Empty list: the same in-flight-exit possibility applies.
+    if (this.status !== 'stopped') {
+      await this.waitForStop(Math.min(this.limits.stepTimeoutMs, 500), signal)
+      if (this.status === 'terminated') throw this.exitedError()
+      try {
+        threads = await this.threads(signal)
+      } catch {
+        threads = []
+      }
+    }
     const thread = threads[0]
-    if (thread === undefined) throw new DebugError('no_thread', 'The debuggee reports no threads.')
+    if (thread === undefined) {
+      throw new DebugError(
+        'no_thread',
+        `The debuggee reports no threads (status: ${this.status}). If the program already finished, launch again — stop_on_entry (the default) keeps quick programs stoppable while breakpoints are set.`,
+      )
+    }
     this.activeThreadId = thread.id
     return thread.id
+  }
+
+  /** Error for actions that need live state on a debuggee that has exited. */
+  private exitedError(): DebugError {
+    const exit = this.exitCode !== undefined ? ` Exit code ${this.exitCode}.` : ''
+    return new DebugError(
+      'no_thread',
+      `The debuggee has already exited.${exit} Launch again with action "launch" — stop_on_entry (the default) keeps quick programs stoppable while breakpoints are set.`,
+    )
   }
 
   private async refreshLocation(signal?: AbortSignal): Promise<void> {

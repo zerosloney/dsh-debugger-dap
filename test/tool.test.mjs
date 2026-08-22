@@ -107,7 +107,10 @@ test('every declared action is reachable in the switch', () => {
 })
 
 test('concurrency whitelist covers only pure reads and nothing else', () => {
-  const safe = ['threads', 'stack_trace', 'scopes', 'variables', 'evaluate', 'output', 'sessions']
+  // `evaluate` is deliberately absent: DAP evaluation runs code inside the
+  // debuggee (context "repl" allows arbitrary side effects), so it must
+  // serialize against stepping and writes.
+  const safe = ['threads', 'stack_trace', 'scopes', 'variables', 'output', 'sessions']
   for (const action of safe) {
     assert.ok(CONCURRENT_SAFE_ACTIONS.has(action), `${action} must be concurrency-safe`)
   }

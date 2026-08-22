@@ -163,6 +163,8 @@ export declare class DebugSession {
     disconnect(terminateDebuggee: boolean): Promise<void>;
     private finishConfiguration;
     private resolveThreadId;
+    /** Error for actions that need live state on a debuggee that has exited. */
+    private exitedError;
     private refreshLocation;
     private waitForEvent;
     private waitForStop;

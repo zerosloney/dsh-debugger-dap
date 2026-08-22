@@ -1,4 +1,4 @@
-# dsh-debugger-dap 使用文档（21 个动作）
+# dsh-debugger-dap 使用文档（29 个动作）
 
 `debug` 工具通过一个判别式参数 `action` 覆盖整套调试流程：启动/附加、各类断点、单步、栈/作用域/变量检视、求值、运行时改值、异常信息、输出与收尾。
 
@@ -262,6 +262,84 @@
 ```json
 { "action": "sessions" }
 ```
+
+---
+
+## 19. `restart` — 按原始 launch 配置重启
+
+```json
+{ "action": "restart" }
+```
+需适配器支持 `restart` 能力（`supportsRestartRequest`）；不支持时报 `not_supported` 并提示重新 launch。
+
+---
+
+## 20. `source` — 读取当前停止位置的源码
+
+```json
+{ "action": "source" }
+```
+返回 `{ content, mime_type }`（当前停止帧对应的源码内容）。
+
+---
+
+## 21. `loaded_sources` — 列出 debuggee 已加载的源文件
+
+```json
+{ "action": "loaded_sources" }
+```
+返回 `[{ path, name }]`。
+
+---
+
+## 22. `modules` — 列出 debuggee 已加载的模块
+
+```json
+{ "action": "modules" }
+```
+返回 `[{ id, name, path, version, loaded }]`。
+
+---
+
+## 23. `set_data_breakpoints` — 数据断点（watchpoint）
+
+| 参数 | 说明 |
+|---|---|
+| `data_breakpoints` | `{ address?, name?, access_type? }[]`；`access_type` ∈ `read`/`write`/`readWrite` |
+| `address` / `watch_name` / `access_type` | 单条速记形式（未传 `data_breakpoints` 时生效） |
+
+```json
+{ "action": "set_data_breakpoints", "watch_name": "count", "access_type": "readWrite" }
+```
+需适配器支持数据断点；返回每条 `{ id, verified, message }`。
+
+---
+
+## 24. `goto_targets` / `goto` — 非顺序跳转
+
+| 参数 | 说明 |
+|---|---|
+| `target_line` | `goto_targets` 的查询行（缺省当前帧所在行） |
+| `target_id` | `goto` 必填，来自 `goto_targets` 返回值 |
+
+```json
+{ "action": "goto_targets", "target_line": 42 }
+{ "action": "goto", "target_id": 1 }
+```
+需适配器支持 `supportsGotoTargetsRequest`。
+
+---
+
+## 25. `restart_frame` — 重跑当前栈帧
+
+| 参数 | 说明 |
+|---|---|
+| `restart_frame_id` | 缺省当前帧；可传 `stack_trace` 返回的帧 id |
+
+```json
+{ "action": "restart_frame" }
+```
+需适配器支持 `supportsRestartFrame`。
 
 ---
 
