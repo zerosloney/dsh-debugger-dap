@@ -141,6 +141,31 @@ test('continue handles immediate synchronous stopped event without timing out', 
   await manager.disposeAll()
 })
 
+test('resume aborted mid-flight leaves no unhandled stop-wait rejection', async () => {
+  // One abort fires both the in-flight continue's onAbort and the
+  // pre-registered stop waiter's onAbort; `send` throws first so the waiter
+  // is never awaited, and its rejection must be marked handled or Node
+  // surfaces it as an unhandled rejection (fatal by default).
+  const script = standardScript({ continue: () => {} }) // never answers
+  const { manager } = buildManager(script)
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py', stopOnEntry: false })
+  const session = manager.sessionFor(owner)
+  const controller = new AbortController()
+  const unhandled = []
+  const onUnhandled = rejection => unhandled.push(rejection)
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    setTimeout(() => controller.abort(), 20)
+    await assert.rejects(session.resume('continue', controller.signal), /DAP continue aborted/)
+    // Let the unhandled-rejection detection pass run before checking.
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.equal(unhandled.length, 0, `unexpected unhandled rejections: ${unhandled.map(String).join(', ')}`)
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+    await manager.disposeAll()
+  }
+})
 
 test('continue past the wait deadline reports running without killing the session', async () => {
   // continue responds but never emits stopped: the step deadline governs.

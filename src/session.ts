@@ -236,7 +236,7 @@ export class DebugSession {
       if (stopOnEntry) {
         // Register the entry-stop waiter before configurationDone so a stop
         // that lands while the request is in flight is never missed.
-        const stopPromise = this.waitForStop(this.limits.requestTimeoutMs, signal)
+        const stopPromise = this.registerStopWaiter(this.limits.requestTimeoutMs, signal)
         await this.finishConfiguration(signal)
         await startResponse
         const state = await stopPromise
@@ -356,7 +356,7 @@ export class DebugSession {
     const threadId = await this.resolveThreadId(signal)
     if (action !== 'pause') this.status = 'running'
     const timeoutMs = action === 'pause' ? this.limits.requestTimeoutMs : this.limits.stepTimeoutMs
-    const stopPromise = this.waitForStop(timeoutMs, signal)
+    const stopPromise = this.registerStopWaiter(timeoutMs, signal)
     await this.connection.send(action, { threadId }, { signal })
     const state = await stopPromise
     const finalStatus = this.readStatus()
@@ -488,7 +488,7 @@ export class DebugSession {
     this.stopReason = undefined
     this.activeThreadId = undefined
     this.currentFrame = undefined
-    const stopPromise = this.waitForStop(this.limits.stepTimeoutMs, signal)
+    const stopPromise = this.registerStopWaiter(this.limits.stepTimeoutMs, signal)
     await this.connection.send('restart', undefined, { signal })
     const state = await stopPromise
     if (state === 'stopped') await this.refreshLocation(signal)
@@ -559,7 +559,7 @@ export class DebugSession {
     }
     this.status = 'running'
     this.stopReason = undefined
-    const stopPromise = this.waitForStop(this.limits.stepTimeoutMs, signal)
+    const stopPromise = this.registerStopWaiter(this.limits.stepTimeoutMs, signal)
     await this.connection.send('goto', { targetId }, { signal })
     const state = await stopPromise
     if (state === 'stopped') await this.refreshLocation(signal)
@@ -768,6 +768,19 @@ export class DebugSession {
       signal?.addEventListener('abort', onAbort, { once: true })
       this.stopWaiter = waiter
     })
+  }
+
+  /**
+   * {@link waitForStop} for waiters registered before their paired request is
+   * sent (resume/restart/goto/start). When that request rejects first — e.g.
+   * one abort fires both the request's and the waiter's onAbort — the
+   * never-awaited waiter would surface as an unhandled rejection. Mark its
+   * rejection handled here; callers that reach their own `await` still see it.
+   */
+  private registerStopWaiter(timeoutMs: number, signal?: AbortSignal): Promise<'stopped' | 'terminated' | 'running'> {
+    const stopPromise = this.waitForStop(timeoutMs, signal)
+    stopPromise.catch(() => {})
+    return stopPromise
   }
 
   private wakeStopWaiter(state: 'stopped' | 'terminated'): void {

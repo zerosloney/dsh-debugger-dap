@@ -168,6 +168,14 @@ export declare class DebugSession {
     private refreshLocation;
     private waitForEvent;
     private waitForStop;
+    /**
+     * {@link waitForStop} for waiters registered before their paired request is
+     * sent (resume/restart/goto/start). When that request rejects first — e.g.
+     * one abort fires both the request's and the waiter's onAbort — the
+     * never-awaited waiter would surface as an unhandled rejection. Mark its
+     * rejection handled here; callers that reach their own `await` still see it.
+     */
+    private registerStopWaiter;
     private wakeStopWaiter;
     private appendOutput;
 }
