@@ -20,7 +20,11 @@ export interface Config {
     maxStackFrames: number;
     maxVariables: number;
     maxResultChars: number;
+    sessionIdleTimeoutMs: number;
+    maxSessionsPerOwner: number;
     adapters: Record<string, AdapterConfigEntry>;
+    ledgerPath: string;
+    ledgerMaxBytes: number;
 }
 export declare const Config: z<Schemastery.ObjectS<{
     requestTimeoutMs: z<number, number>;
@@ -29,6 +33,10 @@ export declare const Config: z<Schemastery.ObjectS<{
     maxStackFrames: z<number, number>;
     maxVariables: z<number, number>;
     maxResultChars: z<number, number>;
+    sessionIdleTimeoutMs: z<number, number>;
+    maxSessionsPerOwner: z<number, number>;
+    ledgerPath: z<string, string>;
+    ledgerMaxBytes: z<number, number>;
     adapters: z<import("@deepseek-ai/cosmokit").Dict<{
         command?: string | null | undefined;
         args?: string[] | null | undefined;
@@ -38,6 +46,8 @@ export declare const Config: z<Schemastery.ObjectS<{
         transport?: "stdio" | "tcp" | null | undefined;
         connectHost?: string | null | undefined;
         connectPort?: number | null | undefined;
+        portPattern?: string | null | undefined;
+        exceptionFilterMap?: import("@deepseek-ai/cosmokit").Dict<string, string> | null | undefined;
     } & import("@deepseek-ai/cosmokit").Dict, string>, import("@deepseek-ai/cosmokit").Dict<Schemastery.ObjectT<{
         command: z<string, string>;
         args: z<string[], string[]>;
@@ -48,8 +58,12 @@ export declare const Config: z<Schemastery.ObjectS<{
         transport: z<"stdio" | "tcp", "stdio" | "tcp">;
         /** TCP connect host (default '127.0.0.1'). Used when transport is 'tcp'. */
         connectHost: z<string, string>;
-        /** TCP connect port. Required when transport is 'tcp'. */
+        /** TCP connect port. Optional when transport is 'tcp' — when absent, the port is discovered from the adapter's stdout. */
         connectPort: z<number, number>;
+        /** Regex (string) matching the adapter's port announcement on stdout, one capture group for the port. Used when transport is 'tcp' without connectPort. */
+        portPattern: z<string, string>;
+        /** Standard DAP exception filter → adapter-specific filter name (e.g. debugpy: { all: 'raised' }). */
+        exceptionFilterMap: z<import("@deepseek-ai/cosmokit").Dict<string, string>, import("@deepseek-ai/cosmokit").Dict<string, string>>;
     }>, string>>;
 }>, Schemastery.ObjectT<{
     requestTimeoutMs: z<number, number>;
@@ -58,6 +72,10 @@ export declare const Config: z<Schemastery.ObjectS<{
     maxStackFrames: z<number, number>;
     maxVariables: z<number, number>;
     maxResultChars: z<number, number>;
+    sessionIdleTimeoutMs: z<number, number>;
+    maxSessionsPerOwner: z<number, number>;
+    ledgerPath: z<string, string>;
+    ledgerMaxBytes: z<number, number>;
     adapters: z<import("@deepseek-ai/cosmokit").Dict<{
         command?: string | null | undefined;
         args?: string[] | null | undefined;
@@ -67,6 +85,8 @@ export declare const Config: z<Schemastery.ObjectS<{
         transport?: "stdio" | "tcp" | null | undefined;
         connectHost?: string | null | undefined;
         connectPort?: number | null | undefined;
+        portPattern?: string | null | undefined;
+        exceptionFilterMap?: import("@deepseek-ai/cosmokit").Dict<string, string> | null | undefined;
     } & import("@deepseek-ai/cosmokit").Dict, string>, import("@deepseek-ai/cosmokit").Dict<Schemastery.ObjectT<{
         command: z<string, string>;
         args: z<string[], string[]>;
@@ -77,8 +97,12 @@ export declare const Config: z<Schemastery.ObjectS<{
         transport: z<"stdio" | "tcp", "stdio" | "tcp">;
         /** TCP connect host (default '127.0.0.1'). Used when transport is 'tcp'. */
         connectHost: z<string, string>;
-        /** TCP connect port. Required when transport is 'tcp'. */
+        /** TCP connect port. Optional when transport is 'tcp' — when absent, the port is discovered from the adapter's stdout. */
         connectPort: z<number, number>;
+        /** Regex (string) matching the adapter's port announcement on stdout, one capture group for the port. Used when transport is 'tcp' without connectPort. */
+        portPattern: z<string, string>;
+        /** Standard DAP exception filter → adapter-specific filter name (e.g. debugpy: { all: 'raised' }). */
+        exceptionFilterMap: z<import("@deepseek-ai/cosmokit").Dict<string, string>, import("@deepseek-ai/cosmokit").Dict<string, string>>;
     }>, string>>;
 }>>;
 export declare function apply(ctx: Context, config: Config): void;

@@ -498,3 +498,216 @@ test('disposeAll tears down every live session', async () => {
   assert.equal(manager.list(owner).length, 0)
   assert.ok(fake.killCount >= 2)
 })
+
+test('disposeAll terminates debuggees of launch sessions only', async () => {
+  // A launch session owns its debuggee, so teardown sends terminateDebuggee;
+  // an attach session must leave the foreign process running.
+  const launchScript = standardScript()
+  const launchFake = createFakeAdapter(launchScript)
+  const launchManager = new DebugSessionManager({
+    spawn: () => launchFake.spawned,
+    resolveAdapter: () => ({ command: 'fake', args: [] }),
+    limits: testLimits,
+  })
+  const attachScript = {
+    ...standardScript(),
+    attach: (server, request, args) => {
+      server.respond(request.seq, 'attach')
+      server.emit('initialized')
+      if (args.stopOnEntry !== false) server.emit('stopped', { reason: 'entry', threadId: 1 })
+    },
+  }
+  const attachFake = createFakeAdapter(attachScript)
+  const attachManager = new DebugSessionManager({
+    spawn: () => attachFake.spawned,
+    resolveAdapter: () => ({ command: 'fake', args: [] }),
+    limits: testLimits,
+  })
+  const owner = {}
+  await launchManager.launch(owner, { program: '/w/app.py', stopOnEntry: false })
+  await attachManager.attach(owner, { processId: 4242, program: '/w/app.exe' })
+
+  await launchManager.disposeAll()
+  await attachManager.disposeAll()
+
+  const launchDisconnect = launchFake.server.received.find(message => message.command === 'disconnect')
+  assert.equal(launchDisconnect.arguments.terminateDebuggee, true)
+  const attachDisconnect = attachFake.server.received.find(message => message.command === 'disconnect')
+  assert.equal(attachDisconnect.arguments.terminateDebuggee, false)
+})
+
+test('failed continue rolls the status back to stopped instead of lying running', async () => {
+  // The adapter rejects continue (e.g. the debuggee is not actually paused):
+  // the session must stay 'stopped', not flip to 'running'.
+  const script = standardScript({
+    continue: (server, request) => server.fail(request.seq, 'continue', 'cannot continue while not paused'),
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py' })
+  const session = manager.sessionFor(owner)
+  assert.equal(session.snapshot().status, 'stopped')
+  await assert.rejects(session.resume('continue'), /cannot continue while not paused/)
+  assert.equal(session.snapshot().status, 'stopped')
+  await manager.disposeAll()
+})
+
+test('failed goto rolls the status back to stopped', async () => {
+  const script = standardScript({
+    goto: (server, request) => server.fail(request.seq, 'goto', 'no such target'),
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py' })
+  const session = manager.sessionFor(owner)
+  session.capabilities.supportsGotoTargetsRequest = true
+  assert.equal(session.snapshot().status, 'stopped')
+  await assert.rejects(session.goto(99), /no such target/)
+  assert.equal(session.snapshot().status, 'stopped')
+  await manager.disposeAll()
+})
+
+test('maxSessionsPerOwner evicts the oldest session beyond the cap', async () => {
+  // Each launch gets its own fake adapter (a real manager spawns a fresh
+  // process per launch; sharing one connection would race the eviction).
+  let fake = createFakeAdapter(standardScript())
+  const manager = new DebugSessionManager({
+    spawn: () => {
+      fake = createFakeAdapter(standardScript())
+      return fake.spawned
+    },
+    resolveAdapter: () => ({ command: 'fake', args: [] }),
+    limits: testLimits,
+    maxSessionsPerOwner: 2,
+    sessionIdleTimeoutMs: 0, // disable the idle reaper for this test
+  })
+  const owner = {}
+  await manager.launch(owner, { program: '/w/a.py', stopOnEntry: false })
+  await manager.launch(owner, { program: '/w/b.py', stopOnEntry: false })
+  assert.equal(manager.list(owner).length, 2)
+  await manager.launch(owner, { program: '/w/c.py', stopOnEntry: false })
+  // The oldest (a) is evicted; b and c remain, and c is now active.
+  const sessions = manager.list(owner)
+  assert.equal(sessions.length, 2)
+  assert.ok(sessions.every(snapshot => snapshot.program !== '/w/a.py'))
+  await manager.disposeAll()
+})
+
+test('idle sessions are reaped after sessionIdleTimeoutMs', async () => {
+  let fake = createFakeAdapter(standardScript())
+  const manager = new DebugSessionManager({
+    spawn: () => {
+      fake = createFakeAdapter(standardScript())
+      return fake.spawned
+    },
+    resolveAdapter: () => ({ command: 'fake', args: [] }),
+    limits: testLimits,
+    sessionIdleTimeoutMs: 60, // aggressive for the test
+    maxSessionsPerOwner: 10,
+  })
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py', stopOnEntry: false })
+  assert.equal(manager.list(owner).length, 1)
+  // Let the reaper tick: the session must be gone after the idle window.
+  await new Promise(resolve => setTimeout(resolve, 250))
+  assert.equal(manager.list(owner).length, 0)
+  await manager.disposeAll()
+})
+
+test('watch ids stay unique after removing an earlier watch', async () => {
+  const { manager } = buildManager(standardScript())
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py' })
+  const session = manager.sessionFor(owner)
+
+  const first = session.addWatch('first')
+  const second = session.addWatch('second')
+  assert.equal(first, 'w1')
+  assert.equal(second, 'w2')
+  assert.equal(session.removeWatch(first), true)
+
+  const third = session.addWatch('third')
+  assert.equal(third, 'w3')
+  assert.deepEqual(
+    session.listWatches().map(watch => ({ id: watch.id, expression: watch.expression })),
+    [
+      { id: 'w2', expression: 'second' },
+      { id: 'w3', expression: 'third' },
+    ],
+  )
+  await manager.disposeAll()
+})
+
+test('goto refreshes watch values after stopping', async () => {
+  let stackTraceCalls = 0
+  let evaluationCalls = 0
+  const script = standardScript({
+    initialize: (server, request) =>
+      server.respond(request.seq, 'initialize', {
+        capabilities: { supportsConfigurationDoneRequest: true, supportsGotoTargetsRequest: true },
+      }),
+    stackTrace: (server, request) => {
+      stackTraceCalls += 1
+      server.respond(request.seq, 'stackTrace', {
+        stackFrames: [{ id: 10, name: 'doWork', source: { path: '/w/src/app.py' }, line: stackTraceCalls === 1 ? 42 : 99, column: 3 }],
+      })
+    },
+    evaluate: (server, request) => {
+      evaluationCalls += 1
+      server.respond(request.seq, 'evaluate', { result: `value-${evaluationCalls}`, type: 'int', variablesReference: 0 })
+    },
+    goto: (server, request) => {
+      server.respond(request.seq, 'goto')
+      server.emit('stopped', { reason: 'goto', threadId: 1 })
+    },
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py' })
+  const session = manager.sessionFor(owner)
+  const watchId = session.addWatch('count')
+  await session.evaluateWatches()
+
+  const snapshot = await session.goto(7)
+  assert.equal(snapshot.status, 'stopped')
+  assert.equal(snapshot.frame?.line, 99)
+  assert.deepEqual(snapshot.watches, [{ id: watchId, expression: 'count', value: 'value-2' }])
+  await manager.disposeAll()
+})
+
+test('restart refreshes watch values after stopping', async () => {
+  let stackTraceCalls = 0
+  let evaluationCalls = 0
+  const script = standardScript({
+    initialize: (server, request) =>
+      server.respond(request.seq, 'initialize', {
+        capabilities: { supportsConfigurationDoneRequest: true, supportsRestartRequest: true },
+      }),
+    stackTrace: (server, request) => {
+      stackTraceCalls += 1
+      server.respond(request.seq, 'stackTrace', {
+        stackFrames: [{ id: 10, name: 'doWork', source: { path: '/w/src/app.py' }, line: stackTraceCalls === 1 ? 42 : 7, column: 3 }],
+      })
+    },
+    evaluate: (server, request) => {
+      evaluationCalls += 1
+      server.respond(request.seq, 'evaluate', { result: `value-${evaluationCalls}`, type: 'int', variablesReference: 0 })
+    },
+    restart: (server, request) => {
+      server.respond(request.seq, 'restart')
+      server.emit('stopped', { reason: 'entry', threadId: 1 })
+    },
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py' })
+  const session = manager.sessionFor(owner)
+  const watchId = session.addWatch('count')
+  await session.evaluateWatches()
+
+  const snapshot = await session.restart()
+  assert.equal(snapshot.status, 'stopped')
+  assert.equal(snapshot.frame?.line, 7)
+  assert.deepEqual(snapshot.watches, [{ id: watchId, expression: 'count', value: 'value-2' }])
+  await manager.disposeAll()
+})

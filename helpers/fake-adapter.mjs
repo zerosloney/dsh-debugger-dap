@@ -106,7 +106,7 @@ export function createFakeAdapter(handlers = {}) {
 
   const closeListeners = new Set()
   const notifyClose = () => {
-    for (const listener of [...closeListeners]) listener()
+    for (const listener of Array.from(closeListeners)) listener()
   }
   clientToServer.on('close', notifyClose)
   serverToClient.on('close', notifyClose)

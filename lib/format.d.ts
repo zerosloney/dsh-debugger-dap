@@ -45,6 +45,13 @@ export interface DebugToolValue {
     frames?: DapFrameView[];
     frames_omitted?: number;
     threads?: ThreadView[];
+    watch_id?: string;
+    watches?: Array<{
+        id: string;
+        expression: string;
+        value?: string;
+        error?: string;
+    }>;
     scopes?: ScopeView[];
     variables?: VariableView[];
     variables_omitted?: number;
@@ -78,6 +85,7 @@ export interface DebugToolValue {
     sources?: Array<{
         path?: string;
         name?: string;
+        source_reference?: number;
     }>;
     modules?: Array<{
         id: string;
@@ -91,6 +99,15 @@ export interface DebugToolValue {
         label: string;
         line: number;
     }>;
+    /** Ledger rows (action 'ledger'). */
+    entries?: Array<{
+        seq: number;
+        ts: string;
+        sessionId?: string;
+        kind: string;
+        detail: Record<string, unknown>;
+    }>;
+    truncated?: boolean;
 }
 export declare function formatSnapshotLines(snapshot: DebugSnapshot): string[];
 export declare function formatBreakpoints(file: string, breakpoints: Array<{

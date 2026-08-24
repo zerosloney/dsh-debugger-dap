@@ -20,6 +20,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --replace-registry-host=always
+      - run: npm run lint
       - run: npm test
 
   publish:

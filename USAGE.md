@@ -1,4 +1,4 @@
-# dsh-debugger-dap 使用文档（29 个动作）
+# dsh-debugger-dap 使用文档（35 个动作）
 
 `debug` 工具通过一个判别式参数 `action` 覆盖整套调试流程：启动/附加、各类断点、单步、栈/作用域/变量检视、求值、运行时改值、异常信息、输出与收尾。
 
@@ -90,6 +90,13 @@
 ---
 
 ## 5. `set_exception_breakpoints` — 异常断点
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `filters` | ✅ | 异常过滤器 id 列表，如 `['all']`、`['uncaught']` |
+| `filter_options` | | 细粒度异常选项（需适配器支持 `supportsExceptionOptions`） |
+
+> 过滤器映射：内置 debugpy 配方会把标准 DAP 的 `'all'` 映射为 debugpy 实际支持的 `'raised'`（debugpy 的过滤器是 `raised`/`uncaught`/`userUnhandled`，没有 `all`——直接下发 `['all']` 会被静默接受但不起作用）。自定义适配器可用 `adapters.<id>.exceptionFilterMap`（如 `{ all: 'raised' }`）声明自己的映射；未映射的过滤器原样透传。
 
 | 参数 | 说明 |
 |---|---|
@@ -265,7 +272,26 @@
 
 ---
 
-## 19. `restart` — 按原始 launch 配置重启
+## 19. `ledger` — 查询调试会话台账
+
+返回最近的关键调试事件（跨会话、跨重启可回溯），供问题排查。
+
+| 参数 | 说明 |
+|---|---|
+| `session_id` | 只查某会话（缺省全部） |
+| `ledger_kinds` | 逗号分隔的事件种类过滤：`session_start, session_end, breakpoints_set, breakpoint_hit, exception, stop, request_error` |
+| `ledger_since` | 只查该 ISO-8601 时间戳之后的条目 |
+| `ledger_limit` | 最多返回条数（默认 50，最大 500，取最新） |
+
+```json
+{ "action": "ledger", "ledger_kinds": "breakpoint_hit,exception", "ledger_limit": 20 }
+```
+
+台账同时追加写入 JSONL 文件（默认 `~/.dsh-debugger-dap/ledger.jsonl`，`ledgerPath` 可配；超限自动轮转到 `<path>.1`），每行一个 JSON：`{seq, ts, sessionId, kind, detail}`。
+
+---
+
+## 20. `restart` — 按原始 launch 配置重启
 
 ```json
 { "action": "restart" }
@@ -274,7 +300,7 @@
 
 ---
 
-## 20. `source` — 读取当前停止位置的源码
+## 21. `source` — 读取当前停止位置的源码
 
 ```json
 { "action": "source" }
@@ -283,7 +309,7 @@
 
 ---
 
-## 21. `loaded_sources` — 列出 debuggee 已加载的源文件
+## 22. `loaded_sources` — 列出 debuggee 已加载的源文件
 
 ```json
 { "action": "loaded_sources" }
@@ -292,7 +318,7 @@
 
 ---
 
-## 22. `modules` — 列出 debuggee 已加载的模块
+## 23. `modules` — 列出 debuggee 已加载的模块
 
 ```json
 { "action": "modules" }
@@ -301,7 +327,7 @@
 
 ---
 
-## 23. `set_data_breakpoints` — 数据断点（watchpoint）
+## 24. `set_data_breakpoints` — 数据断点（watchpoint）
 
 | 参数 | 说明 |
 |---|---|
@@ -315,7 +341,7 @@
 
 ---
 
-## 24. `goto_targets` / `goto` — 非顺序跳转
+## 25. `goto_targets` / `goto` — 非顺序跳转
 
 | 参数 | 说明 |
 |---|---|
@@ -330,7 +356,7 @@
 
 ---
 
-## 25. `restart_frame` — 重跑当前栈帧
+## 26. `restart_frame` — 重跑当前栈帧
 
 | 参数 | 说明 |
 |---|---|

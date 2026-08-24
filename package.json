@@ -34,6 +34,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "oxlint src test helpers",
     "test": "npm run build && node --test"
   },
   "dependencies": {
@@ -47,6 +48,7 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "@types/node": "^24.0.0",
+    "oxlint": "^1.79.0",
     "typescript": "^5.8.0"
   }
 }

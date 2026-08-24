@@ -47,6 +47,8 @@ export interface DebugToolValue {
   frames?: DapFrameView[]
   frames_omitted?: number
   threads?: ThreadView[]
+  watch_id?: string
+  watches?: Array<{ id: string; expression: string; value?: string; error?: string }>
   scopes?: ScopeView[]
   variables?: VariableView[]
   variables_omitted?: number
@@ -64,9 +66,12 @@ export interface DebugToolValue {
   sessions?: DebugSnapshot[]
   content?: string
   mime_type?: string
-  sources?: Array<{ path?: string; name?: string }>
+  sources?: Array<{ path?: string; name?: string; source_reference?: number }>
   modules?: Array<{ id: string; name?: string; path?: string; version?: string; loaded?: boolean }>
   targets?: Array<{ id: number; label: string; line: number }>
+  /** Ledger rows (action 'ledger'). */
+  entries?: Array<{ seq: number; ts: string; sessionId?: string; kind: string; detail: Record<string, unknown> }>
+  truncated?: boolean
 }
 
 function formatLocation(snapshot: DebugSnapshot | undefined): string | null {
@@ -85,11 +90,25 @@ export function formatSnapshotLines(snapshot: DebugSnapshot): string[] {
   if (snapshot.program !== undefined && snapshot.program.length > 0) lines.push(`Program: ${snapshot.program}`)
   if (snapshot.cwd !== undefined && snapshot.cwd.length > 0) lines.push(`CWD: ${snapshot.cwd}`)
   if (snapshot.stopReason !== undefined) lines.push(`Stop reason: ${snapshot.stopReason}`)
+  if (snapshot.allThreadsStopped === true) lines.push('All threads stopped')
   if (snapshot.frame !== undefined) lines.push(`Frame: ${snapshot.frame.name}`)
   const location = formatLocation(snapshot)
   if (location !== null) lines.push(`Location: ${location}`)
   if (snapshot.exitCode !== undefined) lines.push(`Exit code: ${snapshot.exitCode}`)
   if (snapshot.outputChars > 0) lines.push(`Captured output: ${snapshot.outputChars} chars (action "output" reads it)`)
+  if (snapshot.watches !== undefined && snapshot.watches.length > 0) {
+    for (const watch of snapshot.watches) {
+      const value = watch.error !== undefined ? `error: ${watch.error}` : watch.value ?? '…'
+      lines.push(`Watch ${watch.id} (${watch.expression}) = ${value}`)
+    }
+  }
+  const caps = snapshot.capabilities
+  if (caps !== undefined) {
+    const enabled = Object.entries(caps)
+      .filter(([, value]) => value === true)
+      .map(([key]) => key)
+    if (enabled.length > 0) lines.push(`Adapter supports: ${enabled.join(', ')}`)
+  }
   return lines
 }
 
@@ -179,6 +198,12 @@ export function formatVariables(variables: VariableView[], omitted: number): str
 
 export function formatOutcome(value: DebugToolValue, timeoutMs: number): string[] {
   const lines = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+  // Incremental output captured during the resume lands right after the
+  // snapshot so the model sees the program's new output without a separate call.
+  if (value.output !== undefined && value.output.text.length > 0) {
+    lines.push(`New output (${value.output.offset}..${value.output.offset + value.output.text.length} of ${value.output.total_chars} chars):`)
+    lines.push(value.output.text.replace(/\n$/, ''))
+  }
   if (value.timed_out === true) {
     lines.push(`Program is still running after ${timeoutMs}ms. Use action "pause" to interrupt and inspect state.`)
     return lines
@@ -338,6 +363,17 @@ export function renderDebugText(value: DebugToolValue, maxResultChars: number): 
         truncated: value.output?.truncated ?? false,
       })
       break
+    case 'ledger': {
+      const entries = value.entries ?? []
+      sections = [`Ledger entries (${entries.length}${value.truncated === true ? ', truncated to the latest' : ''}):`]
+      if (entries.length === 0) sections.push('(empty ledger)')
+      for (const entry of entries) {
+        const detail = Object.keys(entry.detail).length > 0 ? ` ${JSON.stringify(entry.detail)}` : ''
+        sections.push(`- [${entry.ts}] ${entry.sessionId ?? '-'} ${entry.kind}${detail}`)
+      }
+      sections.push('Ledger file (JSONL, cross-restart): see plugin config ledgerPath.')
+      break
+    }
     default:
       sections = [`Unknown debug action: ${value.action}`]
   }

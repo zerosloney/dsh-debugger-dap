@@ -20,12 +20,20 @@ export interface AdapterSpec {
    * `stopOnEntry`; netcoredbg uses `stopAtEntry`.
    */
   stopOnEntryKey?: string
+  /**
+   * Standard DAP exception filter → adapter-specific filter name. E.g.
+   * debugpy has no 'all' filter (its filters are raised/uncaught/userUnhandled),
+   * so the recipe maps 'all' → 'raised'. Unknown filters pass through.
+   */
+  exceptionFilterMap?: Record<string, string>
   /** Transport layer. Default `'stdio'`; `'tcp'` means the adapter is reached over TCP. */
   transport?: 'stdio' | 'tcp'
   /** Target host for `'tcp'` transport (default `'127.0.0.1'`). */
   host?: string
   /** Target port for `'tcp'` transport. */
   port?: number
+  /** Regex (string or RegExp) matching the adapter's port announcement on stdout, one capture group for the port. Used when the TCP port is discovered. */
+  portPattern?: string | RegExp
 }
 
 /** One `adapters` config row. */
@@ -42,6 +50,10 @@ export interface AdapterConfigEntry {
   connectHost?: string
   /** TCP connect port. Required when transport is 'tcp'. */
   connectPort?: number
+  /** Regex (string) matching the adapter's port announcement on stdout, one capture group for the port. Used when transport is 'tcp' without connectPort. */
+  portPattern?: string
+  /** Standard DAP exception filter → adapter-specific filter name (e.g. debugpy: { all: 'raised' }). */
+  exceptionFilterMap?: Record<string, string>
 }
 
 /** A recipe: id, command line, and how to probe availability. */
@@ -57,6 +69,8 @@ export interface AdapterRecipe {
   launchArgs?: Record<string, unknown>
   /** `launch` field that carries the stop-on-entry control (default `stopOnEntry`). */
   stopOnEntryKey?: string
+  /** Standard DAP exception filter → adapter-specific filter name (e.g. debugpy: { all: 'raised' }). */
+  exceptionFilterMap?: Record<string, string>
   /** Transport layer for this recipe: 'stdio' (default) or 'tcp'. */
   transport?: 'stdio' | 'tcp'
   /** Config row replacing the built-in definition, when present. */
@@ -69,6 +83,9 @@ const BUILT_IN_RECIPES: readonly AdapterRecipe[] = [
     probeCommands: ['python', 'python3'],
     fixedArgs: ['-m', 'debugpy.adapter'],
     installHint: "adapter 'debugpy' is not available: install the debugpy module ('pip install debugpy') and ensure 'python' is on PATH",
+    // debugpy 的异常过滤器是 raised/uncaught/userUnhandled，没有标准 DAP 的 'all'；
+    // 把 'all' 映射为 'raised'（任何异常抛出即停），保持模型侧标准词汇。
+    exceptionFilterMap: { all: 'raised' },
   },
   {
     id: 'dlv',
@@ -150,6 +167,7 @@ export function resolveAdapter(
     const spec = expandConfigEntry(recipe.configOverride)
     spec.launchArgs = recipe.configOverride.launchArgs ?? recipe.launchArgs
     spec.stopOnEntryKey = recipe.stopOnEntryKey ?? 'stopOnEntry'
+    spec.exceptionFilterMap = recipe.configOverride.exceptionFilterMap ?? recipe.exceptionFilterMap
     return spec
   }
   const command = recipe.probeCommands.find(commandExists)
@@ -159,6 +177,7 @@ export function resolveAdapter(
     args: recipe.fixedArgs,
     launchArgs: recipe.launchArgs,
     stopOnEntryKey: recipe.stopOnEntryKey ?? 'stopOnEntry',
+    exceptionFilterMap: recipe.exceptionFilterMap,
     transport: recipe.transport,
   }
 }
@@ -189,9 +208,11 @@ function expandConfigEntry(entry: AdapterConfigEntry): AdapterSpec {
     env: entry.env,
     cwd: entry.cwd,
     launchArgs: entry.launchArgs,
+    exceptionFilterMap: entry.exceptionFilterMap,
     transport: entry.transport,
     host: entry.connectHost,
     port: entry.connectPort,
+    portPattern: entry.portPattern,
   }
 }
 

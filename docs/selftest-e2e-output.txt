@@ -1,0 +1,51 @@
+[0] debugpy.adapter 基线进程数: 0
+
+=== [1] launch（debugpy，stopOnEntry） ===
+  通过: status=stopped stopReason=entry threadId=1
+
+=== [2] 断点：line 13 命中（source + line 正确） ===
+  通过: line=13 source=E:\Demo\cli-tools\dsh-debugger-dap\test\fixtures\debuggee.py
+
+=== [3] stackTrace / scopes / variables ===
+  通过: 栈=main><module> 变量 count=1 total=42 i=0
+
+=== [4] 单步（next）与求值 ===
+  next: line 13 -> 12 (reason=step)
+  通过: continue 再次命中 line 13；evaluate("count + 41") = 42
+  场景 A 断开完成
+
+=== [5] 单步（stepIn / stepOut，进入 add 函数） ===
+  stepIn: 进入 add@line 5
+  stepOut: 回到 main@line 11
+  场景 B 断开完成
+
+=== [6] 异常断点（debuggee_exc.py） ===
+  通过: ZeroDivisionError @ line 5
+  场景 C 断开完成
+
+=== [7] 断开后无残留进程 ===
+  通过: debugpy.adapter 进程 0 -> 0
+
+=== [8] 调试会话台账（ledger.jsonl） ===
+  共 18 条记录：
+  - [2026-08-24T00:44:11.472Z] dbg-1 session_start {"mode":"launch","adapter":"python","program":"E:\\Demo\\cli-tools\\dsh-debugger-dap\\test\\fixtures\\debuggee.py"}
+  - [2026-08-24T00:44:12.485Z] dbg-1 stop {"reason":"entry","threadId":1,"allThreadsStopped":true}
+  - [2026-08-24T00:44:12.491Z] dbg-1 breakpoints_set {"file":"E:\\Demo\\cli-tools\\dsh-debugger-dap\\test\\fixtures\\debuggee.py","lines":[13],"verified":1}
+  - [2026-08-24T00:44:12.494Z] dbg-1 breakpoint_hit {"reason":"breakpoint","threadId":1,"allThreadsStopped":true,"file":"E:\\Demo\\cli-tools\\dsh-debugger-dap\\test\\fixtures\\debuggee.py","line":13,"function":"main"}
+  - [2026-08-24T00:44:12.501Z] dbg-1 stop {"reason":"step","threadId":1,"allThreadsStopped":true}
+  - [2026-08-24T00:44:12.506Z] dbg-1 breakpoint_hit {"reason":"breakpoint","threadId":1,"allThreadsStopped":true,"file":"E:\\Demo\\cli-tools\\dsh-debugger-dap\\test\\fixtures\\debuggee.py","line":13,"function":"main"}
+  - [2026-08-24T00:44:12.508Z] dbg-1 session_end {"endReason":"disconnect","durationMs":1036,"status":"terminated"}
+  - [2026-08-24T00:44:15.324Z] dbg-2 session_start {"mode":"launch","adapter":"python","program":"E:\\Demo\\cli-tools\\dsh-debugger-dap\\test\\fixtures\\debuggee.py"}
+  - [2026-08-24T00:44:16.294Z] dbg-2 stop {"reason":"entry","threadId":1,"allThreadsStopped":true}
+  - [2026-08-24T00:44:16.298Z] dbg-2 breakpoints_set {"file":"E:\\Demo\\cli-tools\\dsh-debugger-dap\\test\\fixtures\\debuggee.py","lines":[11],"verified":1}
+  - [2026-08-24T00:44:16.301Z] dbg-2 breakpoint_hit {"reason":"breakpoint","threadId":1,"allThreadsStopped":true,"file":"E:\\Demo\\cli-tools\\dsh-debugger-dap\\test\\fixtures\\debuggee.py","line":11,"function":"main"}
+  - [2026-08-24T00:44:16.303Z] dbg-2 stop {"reason":"step","threadId":1,"allThreadsStopped":true}
+  - [2026-08-24T00:44:16.306Z] dbg-2 stop {"reason":"step","threadId":1,"allThreadsStopped":true}
+  - [2026-08-24T00:44:16.307Z] dbg-2 session_end {"endReason":"disconnect","durationMs":983,"status":"terminated"}
+  - [2026-08-24T00:44:19.062Z] dbg-3 session_start {"mode":"launch","adapter":"python","program":"E:\\Demo\\cli-tools\\dsh-debugger-dap\\test\\fixtures\\debuggee_exc.py"}
+  - [2026-08-24T00:44:20.089Z] dbg-3 stop {"reason":"entry","threadId":1,"allThreadsStopped":true}
+  - [2026-08-24T00:44:20.095Z] dbg-3 exception {"reason":"exception","threadId":1,"allThreadsStopped":true,"description":"division by zero","file":"E:\\Demo\\cli-tools\\dsh-debugger-dap\\test\\fixtures\\debuggee_exc.py","line":5,"function":"boom"}
+  - [2026-08-24T00:44:20.097Z] dbg-3 session_end {"endReason":"disconnect","durationMs":1035,"status":"terminated"}
+  通过: 台账包含全部关键事件种类，断点/异常条目带位置
+
+===== E2E 全部通过 =====

@@ -5,6 +5,7 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { LedgerKind } from './ledger.js'
 import {
   DebugError,
   DebugSessionManager,
@@ -22,6 +23,7 @@ export const DEBUG_ACTIONS = [
   'step_in',
   'step_over',
   'step_out',
+  'step_back',
   'pause',
   'threads',
   'stack_trace',
@@ -31,9 +33,14 @@ export const DEBUG_ACTIONS = [
   'set_variable',
   'set_expression',
   'exception_info',
+  'select_thread',
+  'add_watch',
+  'remove_watch',
+  'list_watches',
   'output',
   'disconnect',
   'sessions',
+  'ledger',
   'restart',
   'source',
   'loaded_sources',
@@ -50,19 +57,22 @@ export type DebugAction = (typeof DEBUG_ACTIONS)[number]
  * Actions safe to run in parallel with other tool calls. Everything else is
  * serialized: debug state is a live state machine (current frame, thread,
  * stop reason), so only pure reads that do not touch mutable session state
- * are whitelisted. `evaluate` is deliberately NOT whitelisted even though it
- * reads like an inspection action: DAP evaluation runs code inside the
- * debuggee (context "repl" allows arbitrary side effects, and property
- * getters can mutate too), so it must serialize against stepping and writes.
+ * are whitelisted. `stack_trace` is deliberately NOT whitelisted: it records
+ * the session's current frame, so it must serialize against stepping and
+ * other inspection actions to avoid last-writer-wins races. `evaluate` is
+ * also NOT whitelisted even though it reads like an inspection action: DAP
+ * evaluation runs code inside the debuggee (context "repl" allows arbitrary
+ * side effects, and property getters can mutate too), so it must serialize
+ * against stepping and writes.
  * New actions default to serialized (safe side).
  */
 export const CONCURRENT_SAFE_ACTIONS: ReadonlySet<string> = new Set([
   'threads',
-  'stack_trace',
   'scopes',
   'variables',
   'output',
   'sessions',
+  'ledger',
 ])
 
 /**
@@ -103,23 +113,28 @@ const debugParameters = {
   stop_on_entry: { type: 'boolean', description: 'Break immediately at program entry / on attach (default: true for launch, false for attach).' },
   process_id: { type: 'number', description: 'Target process id for attach.' },
   file: { type: 'string', description: 'Source file for set_breakpoints.' },
-  lines: { type: 'array', items: { type: 'number' }, description: 'Line numbers for set_breakpoints; replaces every previous breakpoint in that file.' },
+  lines: { type: 'array', items: { type: 'json' }, description: 'Line numbers for set_breakpoints; replaces every previous breakpoint in that file. Each item may be a number (uses the call-level condition/hit_condition/log_message) or an object { line, condition?, hit_condition?, log_message? } for per-line settings.' },
   condition: { type: 'string', description: 'Conditional expression attached to each listed breakpoint (set_breakpoints / set_function_breakpoints).' },
   hit_condition: { type: 'string', description: 'Hit-condition (e.g. ">3", "5") attached to each listed breakpoint (set_breakpoints / set_function_breakpoints).' },
   log_message: { type: 'string', description: 'Logpoint message printed without stopping; "{}" placeholders are expanded (set_breakpoints).' },
   functions: { type: 'array', items: { type: 'string' }, description: 'Function names for set_function_breakpoints; replaces every previous function breakpoint.' },
   filters: { type: 'array', items: { type: 'string' }, description: "Exception filters for set_exception_breakpoints, e.g. ['all'], ['uncaught'], or ['userUnhandled']." },
   filter_options: { type: 'array', items: { type: 'json' }, description: 'Optional structured exception filterOptions for set_exception_breakpoints (used when the adapter supports them).' },
-  thread_id: { type: 'number', description: 'Thread for stack_trace/exception_info; defaults to the stopped thread.' },
+  thread_id: { type: 'number', description: 'Thread for stack_trace/exception_info; required for select_thread. Defaults to the stopped thread.' },
   frame_id: { type: 'number', description: 'Stack frame for scopes/evaluate/set_expression; defaults to the current stop frame.' },
   variables_ref: { type: 'number', description: 'variablesReference from scopes, variables, or evaluate, for the variables/set_variable actions.' },
   name: { type: 'string', description: 'Variable name for set_variable.' },
   value: { type: 'string', description: 'New value for set_variable/set_expression.' },
   levels: { type: 'number', description: 'Maximum stack frames returned by stack_trace (default 20).' },
+  ledger_kinds: { type: 'string', description: "Ledger kinds filter (comma-separated): session_start, session_end, breakpoints_set, breakpoint_hit, exception, stop, request_error." },
+  ledger_since: { type: 'string', description: 'Ledger filter: only entries at/after this ISO-8601 timestamp.' },
+  ledger_limit: { type: 'number', description: 'Ledger max entries returned (default 50, max 500).' },
   expression: { type: 'string', description: 'Expression evaluated in the debuggee at the current frame.' },
   context: { type: 'string', enum: ['watch', 'repl', 'hover', 'variables', 'clipboard'], description: 'Evaluation context passed to the adapter (default repl).' },
   offset: { type: 'number', description: 'Char offset where the output action starts reading.' },
   max_chars: { type: 'number', description: 'Maximum chars the output action returns (default 4000).' },
+  start: { type: 'number', description: 'First entry for variables/modules paging (0-based).' },
+  count: { type: 'number', description: 'Number of entries for variables/modules paging; variables defaults to the session limit.' },
   terminate_debuggee: { type: 'boolean', description: 'Also kill the debuggee process on disconnect (default true).' },
   target_line: { type: 'number', description: 'Source line for goto_targets.' },
   target_id: { type: 'number', description: 'Target id for goto/restart_frame.' },
@@ -128,6 +143,8 @@ const debugParameters = {
   address: { type: 'string', description: 'Memory address for a data breakpoint.' },
   watch_name: { type: 'string', description: 'Variable name for a watch/data breakpoint.' },
   restart_frame_id: { type: 'number', description: 'Stack frame id for restart_frame.' },
+  source_reference: { type: 'number', description: 'Source reference for the source action; defaults to the current frame (in-memory/REPL sources have a reference but no path).' },
+  watch_id: { type: 'string', description: 'Watch id for remove_watch (returned by add_watch/list_watches).' },
 } as const
 
 const debugOutputSchema = {
@@ -150,8 +167,12 @@ const debugOutputSchema = {
     evaluation: { type: 'json' },
     set_result: { type: 'json' },
     exception: { type: 'json' },
+    watch_id: { type: 'string' },
+    watches: { type: 'json' },
     output: { type: 'json' },
     sessions: { type: 'json' },
+    entries: { type: 'json' },
+    truncated: { type: 'boolean' },
     content: { type: 'string' },
     mime_type: { type: 'string' },
     sources: { type: 'json' },
@@ -171,7 +192,7 @@ export interface DebugArgs {
   stop_on_entry?: boolean
   process_id?: number
   file?: string
-  lines?: number[]
+  lines?: Array<number | { line: number; condition?: string; hit_condition?: string; log_message?: string }>
   condition?: string
   hit_condition?: string
   log_message?: string
@@ -188,6 +209,8 @@ export interface DebugArgs {
   context?: 'watch' | 'repl' | 'hover' | 'variables' | 'clipboard'
   offset?: number
   max_chars?: number
+  start?: number
+  count?: number
   terminate_debuggee?: boolean
   target_line?: number
   target_id?: number
@@ -196,6 +219,11 @@ export interface DebugArgs {
   address?: string
   watch_name?: string
   restart_frame_id?: number
+  source_reference?: number
+  watch_id?: string
+  ledger_kinds?: string
+  ledger_since?: string
+  ledger_limit?: number
 }
 
 /**
@@ -258,12 +286,24 @@ export async function runDebugAction(
       const session = manager.sessionFor(owner, args.session_id)
       const breakpoints = await session.setBreakpoints(
         args.file,
-        args.lines.map(line => ({
-          line,
-          condition: args.condition,
-          hitCondition: args.hit_condition,
-          logMessage: args.log_message,
-        })),
+        args.lines.map(entry => {
+          // Object entries carry per-line conditions; plain numbers inherit
+          // the call-level condition/hit_condition/log_message.
+          if (typeof entry === 'object') {
+            return {
+              line: entry.line,
+              condition: entry.condition,
+              hitCondition: entry.hit_condition,
+              logMessage: entry.log_message,
+            }
+          }
+          return {
+            line: entry,
+            condition: args.condition,
+            hitCondition: args.hit_condition,
+            logMessage: args.log_message,
+          }
+        }),
         signal,
       )
       return { action: 'set_breakpoints', session_id: session.id, snapshot: session.snapshot(), file: args.file, breakpoints }
@@ -310,6 +350,23 @@ export async function runDebugAction(
         snapshot: outcome.snapshot,
         state: outcome.state,
         timed_out: outcome.timedOut,
+        ...(outcome.output === undefined
+          ? {}
+          : { output: { text: outcome.output.text, offset: outcome.output.offset, total_chars: outcome.output.totalChars, truncated: outcome.output.truncated } }),
+      }
+    }
+    case 'step_back': {
+      const session = manager.sessionFor(owner, args.session_id)
+      const outcome = await session.stepBack(signal)
+      return {
+        action: 'step_back',
+        session_id: session.id,
+        snapshot: outcome.snapshot,
+        state: outcome.state,
+        timed_out: outcome.timedOut,
+        ...(outcome.output === undefined
+          ? {}
+          : { output: { text: outcome.output.text, offset: outcome.output.offset, total_chars: outcome.output.totalChars, truncated: outcome.output.truncated } }),
       }
     }
     case 'threads': {
@@ -356,7 +413,10 @@ export async function runDebugAction(
         )
       }
       const session = manager.sessionFor(owner, args.session_id)
-      const { variables, omitted } = await session.variables(args.variables_ref, signal)
+      const { variables, omitted } = await session.variables(args.variables_ref, signal, {
+        start: args.start,
+        count: args.count,
+      })
       return {
         action: 'variables',
         session_id: session.id,
@@ -433,9 +493,43 @@ export async function runDebugAction(
         },
       }
     }
+    case 'select_thread': {
+      if (args.thread_id === undefined) {
+        throw new DebugError('invalid_arguments', "action 'select_thread' requires 'thread_id'.")
+      }
+      const session = manager.sessionFor(owner, args.session_id)
+      await session.selectThread(args.thread_id, signal)
+      return { action: 'select_thread', session_id: session.id, snapshot: session.snapshot() }
+    }
+    case 'add_watch': {
+      if (args.expression === undefined || args.expression.length === 0) {
+        throw new DebugError('invalid_arguments', "action 'add_watch' requires 'expression'.")
+      }
+      const session = manager.sessionFor(owner, args.session_id)
+      const id = session.addWatch(args.expression)
+      // Evaluate immediately so the model sees the current value.
+      await session.evaluateWatches(signal)
+      return { action: 'add_watch', session_id: session.id, snapshot: session.snapshot(), watch_id: id }
+    }
+    case 'remove_watch': {
+      if (args.watch_id === undefined) {
+        throw new DebugError('invalid_arguments', "action 'remove_watch' requires 'watch_id'.")
+      }
+      const session = manager.sessionFor(owner, args.session_id)
+      const removed = session.removeWatch(args.watch_id)
+      if (!removed) throw new DebugError('no_session', `No watch '${args.watch_id}'.`)
+      return { action: 'remove_watch', session_id: session.id, snapshot: session.snapshot() }
+    }
+    case 'list_watches': {
+      const session = manager.sessionFor(owner, args.session_id)
+      return { action: 'list_watches', session_id: session.id, snapshot: session.snapshot(), watches: session.listWatches() }
+    }
     case 'output': {
       const session = manager.sessionFor(owner, args.session_id)
       const page = session.readOutput({ offset: args.offset, maxChars: args.max_chars })
+      // A full read (no explicit offset) consumes the tail so incremental
+      // resume output continues from here; an explicit offset preserves it.
+      if (args.offset === undefined) session.markOutputRead()
       return {
         action: 'output',
         session_id: session.id,
@@ -456,6 +550,26 @@ export async function runDebugAction(
     case 'sessions': {
       return { action: 'sessions', sessions: manager.list(owner) }
     }
+    case 'ledger': {
+      const kinds = args.ledger_kinds === undefined ? undefined : (args.ledger_kinds.split(',').map(kind => kind.trim()).filter(kind => kind.length > 0) as LedgerKind[])
+      const result = manager.ledgerQuery({
+        sessionId: args.session_id,
+        kinds,
+        since: args.ledger_since,
+        limit: args.ledger_limit,
+      })
+      return {
+        action: 'ledger',
+        entries: result.entries.map(entry => ({
+          seq: entry.seq,
+          ts: entry.ts,
+          sessionId: entry.sessionId,
+          kind: entry.kind,
+          detail: entry.detail,
+        })),
+        truncated: result.truncated,
+      }
+    }
     case 'restart': {
       const session = manager.sessionFor(owner, args.session_id)
       const snapshot = await session.restart(signal)
@@ -463,17 +577,17 @@ export async function runDebugAction(
     }
     case 'source': {
       const session = manager.sessionFor(owner, args.session_id)
-      const content = await session.source(signal)
+      const content = await session.source(signal, args.source_reference)
       return { action: 'source', session_id: session.id, snapshot: session.snapshot(), content: content.content, mime_type: content.mimeType }
     }
     case 'loaded_sources': {
       const session = manager.sessionFor(owner, args.session_id)
       const sources = await session.loadedSources(signal)
-      return { action: 'loaded_sources', session_id: session.id, snapshot: session.snapshot(), sources: sources.map(s => ({ path: s.path, name: s.name })) }
+      return { action: 'loaded_sources', session_id: session.id, snapshot: session.snapshot(), sources: sources.map(s => ({ path: s.path, name: s.name, source_reference: s.sourceReference })) }
     }
     case 'modules': {
       const session = manager.sessionFor(owner, args.session_id)
-      const modules = await session.modules(signal)
+      const modules = await session.modules(signal, { start: args.start, count: args.count })
       return { action: 'modules', session_id: session.id, snapshot: session.snapshot(), modules: modules.map(m => ({ id: String(m.id), name: m.name, path: m.path, version: m.version, loaded: m.loaded })) }
     }
     case 'set_data_breakpoints': {
@@ -520,7 +634,7 @@ export function createDebugTool(
       'Interactive debugger over the Debug Adapter Protocol.',
       'Workflow: launch (debugpy/dlv/netcoredbg or a config adapter, stopped at entry by default) → set_breakpoints / set_function_breakpoints / set_exception_breakpoints → continue/step_* → stack_trace → scopes → variables → evaluate / set_variable / set_expression; read stdout/stderr via output; attach by pid; end with disconnect.',
       "Each agent's most recent launch/attach is its active session; pass session_id to address another. Resume actions wait for the next stop and return the new location, or report the program as still running on timeout (then use pause).",
-      'Read-only inspection actions: threads, stack_trace, scopes, variables, exception_info, output, sessions.',
+      'Read-only inspection actions: threads, stack_trace, scopes, variables, exception_info, output, sessions, ledger.',
     ].join('\n'),
     parameters: debugParameters,
     output: {
@@ -533,8 +647,13 @@ export function createDebugTool(
     },
     execute: async (args, exec) => {
       const owner = requireOwner(exec.agent)
-      const value = await runDebugAction(owner, args as DebugArgs, manager, limits, exec.signal)
-      return omitUndefined(value) as never
+      try {
+        const value = await runDebugAction(owner, args as DebugArgs, manager, limits, exec.signal)
+        return omitUndefined(value) as never
+      } catch (error) {
+        manager.recordError(error, (args as DebugArgs).session_id)
+        normalizeError(error)
+      }
     },
   })
 }
@@ -544,4 +663,26 @@ function requireOwner(agent: unknown): object {
     throw new DebugError('no_active_session', 'The debug tool requires an initiating agent context.')
   }
   return agent as object
+}
+
+/**
+ * Normalize transport-level failures into stable DebugError codes so the
+ * model gets a consistent, self-healable error vocabulary instead of raw
+ * adapter errors and timeout strings.
+ */
+function normalizeError(error: unknown): never {
+  if (error instanceof DebugError) throw error
+  if (error instanceof Error) {
+    if (error.name === 'TimeoutError') {
+      throw new DebugError('timeout', `The debug adapter did not respond in time: ${error.message}`)
+    }
+    if (error.name === 'DapRequestError') {
+      throw new DebugError('adapter_error', error.message)
+    }
+    if (error.name === 'DapDisconnectedError') {
+      throw new DebugError('disconnected', `The debug adapter connection closed: ${error.message}`)
+    }
+    throw new DebugError('adapter_error', error.message)
+  }
+  throw new DebugError('adapter_error', String(error))
 }

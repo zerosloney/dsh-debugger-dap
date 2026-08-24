@@ -77,6 +77,7 @@ export declare function readThreads(body: Record<string, unknown> | undefined): 
 export interface DapSource {
     path?: string;
     name?: string;
+    sourceReference?: number;
 }
 export interface DapStackFrame {
     id: number;
@@ -143,6 +144,7 @@ export declare function readSource(body: Record<string, unknown> | undefined): D
 export interface DapLoadedSource {
     path?: string;
     name?: string;
+    sourceReference?: number;
 }
 export declare function readLoadedSources(body: Record<string, unknown> | undefined): DapLoadedSource[];
 /** `modules` response: loaded program modules or shared libraries. */

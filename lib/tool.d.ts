@@ -6,16 +6,19 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { DebugSessionManager, type SessionLimits } from './session.js';
 import { type DebugToolValue } from './format.js';
-export declare const DEBUG_ACTIONS: readonly ["launch", "attach", "set_breakpoints", "set_function_breakpoints", "set_exception_breakpoints", "continue", "step_in", "step_over", "step_out", "pause", "threads", "stack_trace", "scopes", "variables", "evaluate", "set_variable", "set_expression", "exception_info", "output", "disconnect", "sessions", "restart", "source", "loaded_sources", "modules", "set_data_breakpoints", "goto_targets", "goto", "restart_frame"];
+export declare const DEBUG_ACTIONS: readonly ["launch", "attach", "set_breakpoints", "set_function_breakpoints", "set_exception_breakpoints", "continue", "step_in", "step_over", "step_out", "step_back", "pause", "threads", "stack_trace", "scopes", "variables", "evaluate", "set_variable", "set_expression", "exception_info", "select_thread", "add_watch", "remove_watch", "list_watches", "output", "disconnect", "sessions", "ledger", "restart", "source", "loaded_sources", "modules", "set_data_breakpoints", "goto_targets", "goto", "restart_frame"];
 export type DebugAction = (typeof DEBUG_ACTIONS)[number];
 /**
  * Actions safe to run in parallel with other tool calls. Everything else is
  * serialized: debug state is a live state machine (current frame, thread,
  * stop reason), so only pure reads that do not touch mutable session state
- * are whitelisted. `evaluate` is deliberately NOT whitelisted even though it
- * reads like an inspection action: DAP evaluation runs code inside the
- * debuggee (context "repl" allows arbitrary side effects, and property
- * getters can mutate too), so it must serialize against stepping and writes.
+ * are whitelisted. `stack_trace` is deliberately NOT whitelisted: it records
+ * the session's current frame, so it must serialize against stepping and
+ * other inspection actions to avoid last-writer-wins races. `evaluate` is
+ * also NOT whitelisted even though it reads like an inspection action: DAP
+ * evaluation runs code inside the debuggee (context "repl" allows arbitrary
+ * side effects, and property getters can mutate too), so it must serialize
+ * against stepping and writes.
  * New actions default to serialized (safe side).
  */
 export declare const CONCURRENT_SAFE_ACTIONS: ReadonlySet<string>;
@@ -38,7 +41,12 @@ export interface DebugArgs {
     stop_on_entry?: boolean;
     process_id?: number;
     file?: string;
-    lines?: number[];
+    lines?: Array<number | {
+        line: number;
+        condition?: string;
+        hit_condition?: string;
+        log_message?: string;
+    }>;
     condition?: string;
     hit_condition?: string;
     log_message?: string;
@@ -55,6 +63,8 @@ export interface DebugArgs {
     context?: 'watch' | 'repl' | 'hover' | 'variables' | 'clipboard';
     offset?: number;
     max_chars?: number;
+    start?: number;
+    count?: number;
     terminate_debuggee?: boolean;
     target_line?: number;
     target_id?: number;
@@ -67,6 +77,11 @@ export interface DebugArgs {
     address?: string;
     watch_name?: string;
     restart_frame_id?: number;
+    source_reference?: number;
+    watch_id?: string;
+    ledger_kinds?: string;
+    ledger_since?: string;
+    ledger_limit?: number;
 }
 /**
  * Execute one debug action against the manager. Split from the defineTool

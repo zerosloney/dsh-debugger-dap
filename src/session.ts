@@ -4,8 +4,9 @@
  * snapshot so the model always knows where the debuggee is.
  */
 
-import { AdapterUnavailableError, type AdapterSpec } from './adapters.js'
+import type { AdapterSpec } from './adapters.js'
 import { DapConnection, DapDisconnectedError, type SpawnedAdapter } from './connection.js'
+import { DebugLedger, type LedgerEntry, type LedgerKind, type LedgerQuery } from './ledger.js'
 import {
   readBreakpoints,
   readCapabilities,
@@ -60,10 +61,28 @@ export interface DebugSnapshot {
   status: DebugStatus
   stopReason?: string
   threadId?: number
+  /** Whether the last stop halted every thread (allThreadsStopped). */
+  allThreadsStopped?: boolean
   frame?: { id: number; name: string; path?: string; line: number; column: number }
   exitCode?: number
   configuring: boolean
   outputChars: number
+  /** Latest watch expression results (id → value/error). */
+  watches?: Array<{ id: string; expression: string; value?: string; error?: string }>
+  /** Adapter capabilities relevant to model decisions, from the initialize handshake. */
+  capabilities?: {
+    set_variable?: boolean
+    set_expression?: boolean
+    restart?: boolean
+    data_breakpoints?: boolean
+    goto_targets?: boolean
+    restart_frame?: boolean
+    loaded_sources?: boolean
+    modules?: boolean
+    exception_info?: boolean
+    step_back?: boolean
+    terminate?: boolean
+  }
 }
 
 /** One breakpoint as resolved by the adapter. */
@@ -79,6 +98,8 @@ export interface StepOutcome {
   state: 'stopped' | 'running' | 'terminated'
   timedOut: boolean
   snapshot: DebugSnapshot
+  /** New debuggee output since the last read (incremental tail). */
+  output?: OutputPage
 }
 
 /** Page of captured debuggee output. */
@@ -99,7 +120,10 @@ export class DebugError extends Error {
       | 'not_stopped'
       | 'no_thread'
       | 'invalid_arguments'
-      | 'not_supported',
+      | 'not_supported'
+      | 'adapter_error'
+      | 'timeout'
+      | 'disconnected',
     message: string,
   ) {
     super(message)
@@ -113,6 +137,8 @@ interface StopWaiter {
   resolve: (state: 'stopped' | 'terminated') => void
   timer: ReturnType<typeof setTimeout> | undefined
   onAbort: (() => void) | undefined
+  /** The signal this waiter is listening to; needed to detach on cancel. */
+  signal: AbortSignal | undefined
 }
 
 /** One live debug session: adapter connection plus folded state. */
@@ -123,6 +149,8 @@ export class DebugSession {
   activeThreadId: number | undefined
   currentFrame: DapStackFrame | undefined
   capabilities: DapCapabilities = {}
+  /** Whether the last stop halted every thread (allThreadsStopped). */
+  allThreadsStopped: boolean | undefined
   private stopReasonDescription: string | undefined
   private configurationDoneSent = false
   private readonly outputLines: string[] = []
@@ -134,6 +162,20 @@ export class DebugSession {
   private disposed = false
   private cwdValue: string | undefined
   private initializedSeen = false
+  private lastActivityAt = Date.now()
+  /** Session creation time; also the ledger's duration baseline. */
+  private readonly startedAt = Date.now()
+  /** Whether a session_end ledger entry was already written (write-once). */
+  private ledgerEnded = false
+  /** Monotonic creation order, so LRU eviction is stable when timestamps tie. */
+  readonly createdSeq: number
+  /** Absolute char offset up to which output has been consumed by the model. */
+  private outputReadOffset = 0
+  /** Watch id → expression; evaluated on every stop. */
+  private readonly watches = new Map<string, string>()
+  /** Latest watch results (id → { value, error }). */
+  private readonly watchResults = new Map<string, { value?: string; error?: string }>()
+  private nextWatchId = 1
 
   constructor(
     readonly id: string,
@@ -141,7 +183,16 @@ export class DebugSession {
     readonly program: string,
     private readonly spawned: SpawnedAdapter,
     private readonly limits: SessionLimits,
-  ) {}
+    /** Whether this session launched its own debuggee ('launch') or attached to a foreign one ('attach'). */
+    readonly launchMode: 'launch' | 'attach',
+    createdSeq: number,
+    /** Optional session trace ledger; absent = no recording. */
+    private readonly ledger?: DebugLedger,
+    /** Standard DAP exception filter → adapter-specific filter name (e.g. debugpy: { all: 'raised' }). */
+    private readonly exceptionFilterMap?: Record<string, string>,
+  ) {
+    this.createdSeq = createdSeq
+  }
 
   get connection(): DapConnection {
     return this.spawned.connection
@@ -149,6 +200,75 @@ export class DebugSession {
 
   noteCwd(cwd: string | undefined): void {
     this.cwdValue = cwd
+  }
+
+  /** Refresh the idle clock; called by every model-facing action. */
+  touch(): void {
+    this.lastActivityAt = Date.now()
+  }
+
+  /**
+   * Best-effort ledger write for this session; no-op without a ledger.
+   * @param kind - event kind (session_start / breakpoint_hit / ...).
+   * @param detail - JSON-safe detail object.
+   */
+  recordLedger(kind: LedgerKind, detail: Record<string, unknown> = {}): void {
+    this.ledger?.record(this.id, kind, detail)
+  }
+
+  /**
+   * Ledger: record a stop. For breakpoint/exception stops, best-effort
+   * enrich with the top frame location (one lightweight stackTrace request,
+   * never blocking the stop pipeline and never failing the debug flow).
+   */
+  private async recordStopLedger(stopped: {
+    reason?: string
+    description?: string
+    threadId?: number
+    allThreadsStopped?: boolean
+  }): Promise<void> {
+    const reason = stopped.reason ?? 'unknown'
+    const detail: Record<string, unknown> = { reason, threadId: stopped.threadId }
+    if (stopped.allThreadsStopped !== undefined) detail.allThreadsStopped = stopped.allThreadsStopped
+    if (stopped.description !== undefined) detail.description = stopped.description
+    const enrich = reason === 'breakpoint' || reason === 'exception'
+    if (enrich && stopped.threadId !== undefined) {
+      try {
+        const body = await this.connection.send(
+          'stackTrace',
+          { threadId: stopped.threadId, startFrame: 0, levels: 1 },
+          { timeoutMs: 2000 },
+        )
+        const frame = readStackFrames(body)[0]
+        if (frame !== undefined) {
+          detail.file = frame.source?.path
+          detail.line = frame.line
+          detail.function = frame.name
+        }
+      } catch {
+        // 位置补全是尽力而为：停机本身仍然入账。
+      }
+    }
+    const kind: LedgerKind =
+      reason === 'breakpoint' ? 'breakpoint_hit' : reason === 'exception' ? 'exception' : 'stop'
+    this.recordLedger(kind, detail)
+  }
+
+  /** Ledger: write the session_end entry exactly once. */
+  private endLedger(endReason: string): void {
+    if (this.ledgerEnded) return
+    this.ledgerEnded = true
+    this.recordLedger('session_end', {
+      endReason,
+      exitCode: this.exitCode,
+      durationMs: Date.now() - this.startedAt,
+      status: 'terminated',
+    })
+  }
+
+  /** Milliseconds since the last activity. */
+  idleMs(): number {
+    return Date.now() - this.lastActivityAt
   }
 
   wireEvents(): void {
@@ -163,12 +283,18 @@ export class DebugSession {
         this.stopReason = stopped.reason
         this.stopReasonDescription = stopped.description
         if (stopped.threadId !== undefined) this.activeThreadId = stopped.threadId
+        this.allThreadsStopped = stopped.allThreadsStopped
         this.wakeStopWaiter('stopped')
+        void this.recordStopLedger(stopped)
       }),
-      connection.onEvent('thread', () => {}),
+      connection.onEvent('thread', () => {
+        // Thread started/exited notifications: the threads list is re-queried
+        // on demand via the threads action, so no cache is maintained here.
+      }),
       connection.onEvent('terminated', () => {
         this.status = 'terminated'
         this.wakeStopWaiter('terminated')
+        this.endLedger('debuggee_exit')
       }),
       connection.onEvent('exited', body => {
         this.exitCode = readExitCode(body)
@@ -185,6 +311,7 @@ export class DebugSession {
           this.status = 'terminated'
           this.wakeStopWaiter('terminated')
         }
+        this.endLedger('adapter_close')
       }),
     )
   }
@@ -342,6 +469,11 @@ export class DebugSession {
       }
     })
     this.breakpointsByFile.set(file, records)
+    this.recordLedger('breakpoints_set', {
+      file,
+      lines: lines.map(entry => entry.line),
+      verified: records.filter(record => record.verified).length,
+    })
     return records
   }
 
@@ -354,6 +486,7 @@ export class DebugSession {
     }
     await this.finishConfiguration(signal)
     const threadId = await this.resolveThreadId(signal)
+    const previousStatus = this.status
     if (action !== 'pause') this.status = 'running'
     const timeoutMs = action === 'pause' ? this.limits.requestTimeoutMs : this.limits.stepTimeoutMs
     const stopPromise = this.registerStopWaiter(timeoutMs, signal)
@@ -361,14 +494,25 @@ export class DebugSession {
     const state = await stopPromise
     const finalStatus = this.readStatus()
     const timedOut = state === 'stopped' ? false : finalStatus !== 'terminated'
-    if (state === 'stopped') await this.refreshLocation(signal)
+    if (state === 'stopped') {
+      await this.refreshLocation(signal)
+      await this.evaluateWatches(signal)
+    }
     return {
       state: state === 'stopped' && finalStatus === 'stopped' ? 'stopped' : finalStatus === 'terminated' ? 'terminated' : 'running',
       timedOut,
       snapshot: this.snapshot(),
+      output: this.takeIncrementalOutput(),
     }
   }
 
+  /** Output produced since the last consumed offset (empty when nothing new). */
+  private takeIncrementalOutput(): OutputPage | undefined {
+    if (this.outputChars <= this.outputReadOffset) return undefined
+    const page = this.readOutput({ offset: this.outputReadOffset })
+    this.outputReadOffset = page.offset + page.text.length
+    return page
+  }
   private readStatus(): DebugStatus {
     return this.status
   }
@@ -376,6 +520,86 @@ export class DebugSession {
   async threads(signal?: AbortSignal): Promise<DapThread[]> {
     const body = await this.connection.send('threads', undefined, { signal })
     return readThreads(body)
+  }
+
+  /** Switch the session's focus thread; later steps and stack_trace use it. */
+  async selectThread(threadId: number, signal?: AbortSignal): Promise<void> {
+    const threads = await this.threads(signal)
+    if (!threads.some(thread => thread.id === threadId)) {
+      throw new DebugError('no_thread', `Thread ${threadId} does not exist (available: ${threads.map(thread => thread.id).join(', ')}).`)
+    }
+    this.activeThreadId = threadId
+    this.currentFrame = undefined
+  }
+
+  /** Step backwards (requires adapter supportsStepBack); waits for the next stop. */
+  async stepBack(signal?: AbortSignal): Promise<StepOutcome> {
+    if (this.capabilities.supportsStepBack !== true) {
+      throw new DebugError('not_supported', "The adapter does not support 'stepBack'. Upgrade the debugger or step forward instead.")
+    }
+    if (this.status === 'terminated') {
+      return { state: 'terminated', timedOut: false, snapshot: this.snapshot() }
+    }
+    await this.finishConfiguration(signal)
+    const threadId = await this.resolveThreadId(signal)
+    const previousStatus = this.status
+    this.status = 'running'
+    const stopPromise = this.waitForStop(this.limits.stepTimeoutMs, signal)
+    try {
+      await this.connection.send('stepBack', { threadId }, { signal })
+    } catch (error) {
+      this.clearStopWaiter()
+      this.status = previousStatus
+      throw error
+    }
+    const state = await stopPromise
+    const finalStatus = this.readStatus()
+    const timedOut = state === 'stopped' ? false : finalStatus !== 'terminated'
+    if (state === 'stopped') {
+      await this.refreshLocation(signal)
+      await this.evaluateWatches(signal)
+    }
+    return {
+      state: state === 'stopped' && finalStatus === 'stopped' ? 'stopped' : finalStatus === 'terminated' ? 'terminated' : 'running',
+      timedOut,
+      snapshot: this.snapshot(),
+      output: this.takeIncrementalOutput(),
+    }
+  }
+
+  /** Add or replace a watch expression; returns its id. */
+  addWatch(expression: string): string {
+    const id = `w${this.nextWatchId++}`
+    this.watches.set(id, expression)
+    this.watchResults.delete(id)
+    return id
+  }
+
+  removeWatch(id: string): boolean {
+    const removed = this.watches.delete(id)
+    this.watchResults.delete(id)
+    return removed
+  }
+
+  listWatches(): Array<{ id: string; expression: string; value?: string; error?: string }> {
+    return [...this.watches.entries()].map(([id, expression]) => ({
+      id,
+      expression,
+      ...this.watchResults.get(id),
+    }))
+  }
+
+  /** Evaluate every watch in the current frame; failures are captured per watch. */
+  async evaluateWatches(signal?: AbortSignal): Promise<void> {
+    if (this.watches.size === 0 || this.currentFrame === undefined) return
+    for (const [id, expression] of this.watches) {
+      try {
+        const evaluation = await this.evaluate(expression, this.currentFrame.id, 'watch', signal)
+        this.watchResults.set(id, { value: evaluation.result })
+      } catch (error) {
+        this.watchResults.set(id, { error: error instanceof Error ? error.message : String(error) })
+      }
+    }
   }
 
   async stackTrace(levels: number, signal?: AbortSignal): Promise<DapFrameView[]> {
@@ -399,11 +623,31 @@ export class DebugSession {
     return readScopes(body)
   }
 
-  async variables(variablesReference: number, signal?: AbortSignal): Promise<{ variables: DapVariable[]; omitted: number }> {
-    const body = await this.connection.send('variables', { variablesReference }, { signal })
+  async variables(
+    variablesReference: number,
+    signal?: AbortSignal,
+    paging?: { start?: number; count?: number },
+  ): Promise<{ variables: DapVariable[]; omitted: number }> {
+    const body = await this.connection.send(
+      'variables',
+      {
+        variablesReference,
+        ...(paging?.start === undefined ? {} : { start: paging.start }),
+        ...(paging?.count === undefined ? {} : { count: paging.count }),
+      },
+      { signal },
+    )
     const all = readVariables(body)
-    const shown = all.slice(0, this.limits.maxVariables)
-    return { variables: shown, omitted: all.length - shown.length }
+    const shown = all.slice(0, paging?.count ?? this.limits.maxVariables)
+    // Truncate oversized scalar values in the data layer (not just at render
+    // time) so one giant string cannot blow up the model-facing result.
+    const perValueCap = Math.max(200, Math.floor(this.limits.maxResultChars / 4))
+    const bounded = shown.map(variable =>
+      variable.value.length > perValueCap
+        ? { ...variable, value: `${variable.value.slice(0, perValueCap)}…(${variable.value.length} chars)` }
+        : variable,
+    )
+    return { variables: bounded, omitted: all.length - shown.length }
   }
 
   async evaluate(
@@ -418,7 +662,12 @@ export class DebugSession {
       { expression, context: context ?? 'repl', ...(resolved === undefined ? {} : { frameId: resolved }) },
       { signal },
     )
-    return readEvaluation(body)
+    const evaluation = readEvaluation(body)
+    const cap = Math.max(200, Math.floor(this.limits.maxResultChars / 4))
+    if (evaluation.result.length > cap) {
+      evaluation.result = `${evaluation.result.slice(0, cap)}…(${evaluation.result.length} chars)`
+    }
+    return evaluation
   }
 
   async setVariable(variablesReference: number, name: string, value: string, signal?: AbortSignal): Promise<DapSetResult> {
@@ -465,9 +714,11 @@ export class DebugSession {
   }
 
   async setExceptionBreakpoints(filters: readonly string[], filterOptions: unknown[] | undefined, signal?: AbortSignal): Promise<void> {
+    // 配方级过滤器映射（如 debugpy 的 'all' → 'raised'）：模型侧保持标准 DAP 词汇。
+    const mapped = [...filters].map(filter => this.exceptionFilterMap?.[filter] ?? filter)
     const body: Record<string, unknown> = filterOptions !== undefined && this.capabilities.supportsExceptionOptions
       ? { filterOptions }
-      : { filters: [...filters] }
+      : { filters: mapped }
     await this.connection.send('setExceptionBreakpoints', body, { signal })
   }
 
@@ -484,6 +735,7 @@ export class DebugSession {
     if (this.capabilities.supportsRestartRequest !== true) {
       throw new DebugError('not_supported', "The adapter does not support 'restart'. Upgrade the debugger or launch again.")
     }
+    const previousStatus = this.status
     this.status = 'running'
     this.stopReason = undefined
     this.activeThreadId = undefined
@@ -491,16 +743,31 @@ export class DebugSession {
     const stopPromise = this.registerStopWaiter(this.limits.stepTimeoutMs, signal)
     await this.connection.send('restart', undefined, { signal })
     const state = await stopPromise
-    if (state === 'stopped') await this.refreshLocation(signal)
+    if (state === 'stopped') {
+      await this.refreshLocation(signal)
+      await this.evaluateWatches(signal)
+    }
     return this.snapshot()
   }
 
-  async source(signal?: AbortSignal): Promise<DapSourceContent> {
+  async source(signal?: AbortSignal, sourceReference?: number): Promise<DapSourceContent> {
     const frame = this.currentFrame
-    if (frame === undefined || frame.source?.path === undefined) {
-      throw new DebugError('not_stopped', 'No current frame with a source path: stop at a breakpoint first.')
+    // An explicit sourceReference wins; otherwise fall back to the current
+    // frame's source. In-memory sources (REPL code, eval'd scripts) carry a
+    // sourceReference but no path — support both.
+    const ref = sourceReference ?? frame?.source?.sourceReference
+    const path = frame?.source?.path
+    if (ref === undefined && path === undefined) {
+      throw new DebugError('not_stopped', 'No current frame with a source: stop at a breakpoint first, or pass source_reference.')
     }
-    const body = await this.connection.send('source', { source: { path: frame.source.path }, sourceReference: 0 }, { signal })
+    const body = await this.connection.send(
+      'source',
+      {
+        source: path === undefined ? {} : { path },
+        sourceReference: ref ?? 0,
+      },
+      { signal },
+    )
     return readSource(body)
   }
 
@@ -512,11 +779,18 @@ export class DebugSession {
     return readLoadedSources(body)
   }
 
-  async modules(signal?: AbortSignal): Promise<DapModule[]> {
+  async modules(signal?: AbortSignal, paging?: { start?: number; count?: number }): Promise<DapModule[]> {
     if (this.capabilities.supportsModulesRequest !== true) {
       throw new DebugError('not_supported', "The adapter does not support 'modules'.")
     }
-    const body = await this.connection.send('modules', undefined, { signal })
+    const body = await this.connection.send(
+      'modules',
+      {
+        ...(paging?.start === undefined ? {} : { startModule: paging.start }),
+        ...(paging?.count === undefined ? {} : { moduleCount: paging.count }),
+      },
+      { signal },
+    )
     return readModules(body)
   }
 
@@ -557,12 +831,16 @@ export class DebugSession {
     if (this.capabilities.supportsGotoTargetsRequest !== true) {
       throw new DebugError('not_supported', "The adapter does not support 'goto'.")
     }
+    const previousStatus = this.status
     this.status = 'running'
     this.stopReason = undefined
     const stopPromise = this.registerStopWaiter(this.limits.stepTimeoutMs, signal)
     await this.connection.send('goto', { targetId }, { signal })
     const state = await stopPromise
-    if (state === 'stopped') await this.refreshLocation(signal)
+    if (state === 'stopped') {
+      await this.refreshLocation(signal)
+      await this.evaluateWatches(signal)
+    }
     return this.snapshot()
   }
 
@@ -601,6 +879,11 @@ export class DebugSession {
     return { text, offset: start, totalChars: this.outputChars, truncated: truncatedByEviction }
   }
 
+  /** Mark output consumed up to `offset` (or the current tail); incremental reads start there. */
+  markOutputRead(offset?: number): void {
+    this.outputReadOffset = Math.max(this.outputReadOffset, Math.min(offset ?? this.outputChars, this.outputChars))
+  }
+
   snapshot(): DebugSnapshot {
     const frame = this.currentFrame
     return {
@@ -611,6 +894,7 @@ export class DebugSession {
       status: this.status,
       stopReason: this.stopReason,
       threadId: this.activeThreadId,
+      allThreadsStopped: this.allThreadsStopped,
       frame:
         frame === undefined
           ? undefined
@@ -618,6 +902,20 @@ export class DebugSession {
       exitCode: this.exitCode,
       configuring: this.status === 'configuring',
       outputChars: this.outputChars,
+      watches: this.listWatches().length > 0 ? this.listWatches() : undefined,
+      capabilities: {
+        set_variable: this.capabilities.supportsSetVariable,
+        set_expression: this.capabilities.supportsSetExpression,
+        restart: this.capabilities.supportsRestartRequest,
+        data_breakpoints: this.capabilities.supportsDataBreakpoints,
+        goto_targets: this.capabilities.supportsGotoTargetsRequest,
+        restart_frame: this.capabilities.supportsRestartFrame,
+        loaded_sources: this.capabilities.supportsLoadedSourcesRequest,
+        modules: this.capabilities.supportsModulesRequest,
+        exception_info: this.capabilities.supportsExceptionInfoRequest,
+        step_back: this.capabilities.supportsStepBack,
+        terminate: this.capabilities.supportsTerminateRequest,
+      },
     }
   }
 
@@ -626,6 +924,7 @@ export class DebugSession {
     this.disposed = true
     this.status = 'terminated'
     this.wakeStopWaiter('terminated')
+    this.endLedger('disconnect')
     try {
       await this.connection.send('disconnect', { terminateDebuggee }, { timeoutMs: 2000 })
     } catch {
@@ -759,6 +1058,7 @@ export class DebugSession {
         },
         timer: undefined,
         onAbort,
+        signal,
       }
       waiter.timer = setTimeout(() => {
         this.stopWaiter = undefined
@@ -813,12 +1113,20 @@ export interface DapFrameView {
   id: number
   name: string
   path?: string
+  sourceReference?: number
   line: number
   column: number
 }
 
 function toFrameView(frame: DapStackFrame): DapFrameView {
-  return { id: frame.id, name: frame.name, path: frame.source?.path, line: frame.line, column: frame.column }
+  return {
+    id: frame.id,
+    name: frame.name,
+    path: frame.source?.path,
+    sourceReference: frame.source?.sourceReference,
+    line: frame.line,
+    column: frame.column,
+  }
 }
 
 /** One launch request as handed to the manager. */
@@ -851,16 +1159,42 @@ export class DebugSessionManager {
       spawn: SpawnAdapterFn
       resolveAdapter: (options: { adapter?: string; program: string }) => AdapterSpec
       limits: SessionLimits
+      /** Idle time after which a session is auto-disconnected; 0 disables. Default 30 minutes. */
+      sessionIdleTimeoutMs?: number
+      /** Max live sessions per owner; beyond this, the oldest is evicted. Default 5. */
+      maxSessionsPerOwner?: number
+      /** Session trace ledger; absent = default path ~/.dsh-debugger-dap/ledger.jsonl. */
+      ledger?: DebugLedger
     },
-  ) {}
+  ) {
+    const idleMs = deps.sessionIdleTimeoutMs ?? 30 * 60 * 1000
+    this.maxPerOwner = deps.maxSessionsPerOwner ?? 5
+    this.ledger = deps.ledger ?? DebugLedger.create()
+    if (idleMs > 0) {
+      const timer = setInterval(() => void this.reapIdle(idleMs), Math.min(idleMs, 60_000))
+      timer.unref?.()
+      this.reaper = timer
+    }
+  }
+
+  private reaper: ReturnType<typeof setInterval> | undefined
+  private readonly maxPerOwner: number
+  /** Session trace ledger backing every session; never null (default file path). */
+  private readonly ledger: DebugLedger
 
   async launch(owner: object, request: ManagerLaunchRequest, signal?: AbortSignal): Promise<DebugSnapshot> {
     const spec = this.deps.resolveAdapter({ adapter: request.adapterId, program: request.program })
     const id = `dbg-${this.nextId++}`
     const spawned = await this.deps.spawn(spec)
-    const session = new DebugSession(id, spec.command, request.program, spawned, this.deps.limits)
+    const session = new DebugSession(id, spec.command, request.program, spawned, this.deps.limits, 'launch', this.nextId, this.ledger, spec.exceptionFilterMap)
     session.noteCwd(request.cwd)
     session.wireEvents()
+    session.recordLedger('session_start', {
+      mode: 'launch',
+      adapter: spec.command,
+      program: request.program,
+      cwd: request.cwd,
+    })
     this.sessions.set(id, { session, owner })
     try {
       const snapshot = await session.launch({
@@ -872,10 +1206,12 @@ export class DebugSessionManager {
         signal,
       })
       this.activeByOwner.set(owner, id)
+      this.evictIfOverLimit(owner)
       return snapshot
     } catch (error) {
       this.sessions.delete(id)
-      await session.disconnect(false)
+      // Launch sessions own the (possibly half-started) debuggee: kill it.
+      await session.disconnect(true)
       throw error
     }
   }
@@ -884,9 +1220,15 @@ export class DebugSessionManager {
     const spec = this.deps.resolveAdapter({ adapter: request.adapterId, program: request.program ?? '' })
     const id = `dbg-${this.nextId++}`
     const spawned = await this.deps.spawn(spec)
-    const session = new DebugSession(id, spec.command, request.program ?? `pid:${request.processId}`, spawned, this.deps.limits)
+    const session = new DebugSession(id, spec.command, request.program ?? `pid:${request.processId}`, spawned, this.deps.limits, 'attach', this.nextId, this.ledger, spec.exceptionFilterMap)
     session.noteCwd(request.cwd)
     session.wireEvents()
+    session.recordLedger('session_start', {
+      mode: 'attach',
+      adapter: spec.command,
+      program: request.program ?? `pid:${request.processId}`,
+      cwd: request.cwd,
+    })
     this.sessions.set(id, { session, owner })
     try {
       const snapshot = await session.attach({
@@ -899,9 +1241,11 @@ export class DebugSessionManager {
         signal,
       })
       this.activeByOwner.set(owner, id)
+      this.evictIfOverLimit(owner)
       return snapshot
     } catch (error) {
       this.sessions.delete(id)
+      // Attach sessions never own the target: leave the foreign process alone.
       await session.disconnect(false)
       throw error
     }
@@ -913,6 +1257,7 @@ export class DebugSessionManager {
       record = this.sessions.get(id)
       if (record === undefined) throw new DebugError('no_session', `No debug session '${id}'.`)
       if (record.owner !== owner) throw new DebugError('foreign_session', `Debug session '${id}' belongs to another agent.`)
+      record.session.touch()
       return record.session
     }
     const activeId = this.activeByOwner.get(owner)
@@ -923,11 +1268,26 @@ export class DebugSessionManager {
     if (record === undefined) {
       throw new DebugError('no_active_session', 'No active debug session. Launch first with action "launch".')
     }
+    record.session.touch()
     return record.session
   }
 
   list(owner: object): DebugSnapshot[] {
     return [...this.sessions.values()].filter(record => record.owner === owner).map(record => record.session.snapshot())
+  }
+
+  /** Query the session trace ledger (跨会话、跨重启可回溯)。 */
+  ledgerQuery(options?: LedgerQuery): { entries: LedgerEntry[]; truncated: boolean } {
+    return this.ledger.query(options)
+  }
+
+  /** Ledger: record one model-action failure with its stable error code. */
+  recordError(error: unknown, sessionId?: string): void {
+    const detail: Record<string, unknown> = {
+      message: error instanceof Error ? error.message : String(error),
+    }
+    if (error instanceof DebugError) detail.code = error.code
+    this.ledger.record(sessionId, 'request_error', detail)
   }
 
   async disconnect(owner: object, id: string | undefined, terminateDebuggee: boolean): Promise<DebugSnapshot | undefined> {
@@ -940,7 +1300,15 @@ export class DebugSessionManager {
   }
 
   async disposeAll(): Promise<void> {
-    const pending = [...this.sessions.values()].map(record => record.session.disconnect(false))
+    if (this.reaper !== undefined) {
+      clearInterval(this.reaper)
+      this.reaper = undefined
+    }
+    // Sessions we launched own their debuggee, so teardown terminates it;
+    // attach sessions must leave the foreign process running.
+    const pending = [...this.sessions.values()].map(record =>
+      record.session.disconnect(record.session.launchMode === 'launch'),
+    )
     this.sessions.clear()
     await Promise.allSettled(pending)
   }
@@ -951,7 +1319,42 @@ export class DebugSessionManager {
     const record = this.sessions.get(activeId)
     return record?.session
   }
+
+  /** Disconnect sessions idle longer than `idleMs`. */
+  private async reapIdle(idleMs: number): Promise<void> {
+    const stale = [...this.sessions.entries()].filter(([, record]) => record.session.idleMs() > idleMs)
+    for (const [id, record] of stale) {
+      this.sessions.delete(id)
+      if (this.activeByOwner.get(record.owner) === id) this.activeByOwner.delete(record.owner)
+      await record.session.disconnect(record.session.launchMode === 'launch')
+    }
+  }
+
+  /** Evict the oldest session beyond the per-owner cap, if any. */
+  private evictIfOverLimit(owner: object): void {
+    if (this.maxPerOwner <= 0) return
+    const owned = [...this.sessions.entries()].filter(([, record]) => record.owner === owner)
+    if (owned.length <= this.maxPerOwner) return
+    const activeId = this.activeByOwner.get(owner)
+    // Most-idle first (descending idleMs); createdSeq breaks timestamp ties.
+    // The owner's active session is pinned to the end so eviction never
+    // silently disconnects the session the model is actually using.
+    owned.sort((a, b) => {
+      const aActive = a[0] === activeId ? 1 : 0
+      const bActive = b[0] === activeId ? 1 : 0
+      if (aActive !== bActive) return aActive - bActive
+      const byActivity = b[1].session.idleMs() - a[1].session.idleMs()
+      return byActivity !== 0 ? byActivity : a[1].session.createdSeq - b[1].session.createdSeq
+    })
+    const excess = owned.length - this.maxPerOwner
+    for (let i = 0; i < excess; i += 1) {
+      const [id, record] = owned[i]
+      this.sessions.delete(id)
+      if (this.activeByOwner.get(record.owner) === id) this.activeByOwner.delete(record.owner)
+      void record.session.disconnect(record.session.launchMode === 'launch')
+    }
+  }
 }
 
 /** Re-exported so the tool layer can catch adapter resolution failures uniformly. */
-export { AdapterUnavailableError }
+export { AdapterUnavailableError } from './adapters.js'

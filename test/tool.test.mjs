@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { runDebugAction, DEBUG_ACTIONS, CONCURRENT_SAFE_ACTIONS, omitUndefined } from '../lib/tool.js'
-import { DebugSessionManager } from '../lib/session.js'
+import { DebugError, DebugSessionManager } from '../lib/session.js'
 import { createFakeAdapter, standardScript, testLimits } from '../helpers/fake-adapter.mjs'
 
 function buildManager(script) {
@@ -107,10 +107,11 @@ test('every declared action is reachable in the switch', () => {
 })
 
 test('concurrency whitelist covers only pure reads and nothing else', () => {
-  // `evaluate` is deliberately absent: DAP evaluation runs code inside the
-  // debuggee (context "repl" allows arbitrary side effects), so it must
+  // `stack_trace` and `evaluate` are deliberately absent: stack_trace records
+  // the session's current frame, and DAP evaluation runs code inside the
+  // debuggee (context "repl" allows arbitrary side effects) — both must
   // serialize against stepping and writes.
-  const safe = ['threads', 'stack_trace', 'scopes', 'variables', 'output', 'sessions']
+  const safe = ['threads', 'scopes', 'variables', 'output', 'sessions', 'ledger']
   for (const action of safe) {
     assert.ok(CONCURRENT_SAFE_ACTIONS.has(action), `${action} must be concurrency-safe`)
   }
@@ -194,5 +195,216 @@ test('attach action requires an adapter and process_id', async () => {
   )
   assert.equal(result.action, 'attach')
   assert.ok(result.session_id)
+  await manager.disposeAll()
+})
+
+test('snapshot carries the adapter capabilities for model decisions', async () => {
+  const script = standardScript({
+    initialize: (server, request) =>
+      server.respond(request.seq, 'initialize', {
+        capabilities: {
+          supportsConfigurationDoneRequest: true,
+          supportsSetVariable: true,
+          supportsDataBreakpoints: true,
+          supportsGotoTargetsRequest: true,
+          supportsLoadedSourcesRequest: true,
+        },
+      }),
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  const launch = await runDebugAction(owner, { action: 'launch', program: '/w/app.py' }, manager, testLimits)
+  const caps = launch.snapshot.capabilities
+  assert.equal(caps.set_variable, true)
+  assert.equal(caps.data_breakpoints, true)
+  assert.equal(caps.goto_targets, true)
+  assert.equal(caps.loaded_sources, true)
+  // Absent capabilities are false/undefined, not misreported as true.
+  assert.equal(caps.restart, undefined)
+  assert.equal(caps.terminate, undefined)
+  await manager.disposeAll()
+})
+
+test('source action reads in-memory sources by source_reference', async () => {
+  // A frame whose source has a sourceReference but no path: source must send
+  // the reference instead of hardcoding 0.
+  const script = standardScript({
+    stackTrace: (server, request) =>
+      server.respond(request.seq, 'stackTrace', {
+        stackFrames: [
+          {
+            id: 10,
+            name: 'replEval',
+            source: { name: '<eval>', sourceReference: 77 },
+            line: 1,
+            column: 1,
+          },
+        ],
+      }),
+    source: (server, request, args) => {
+      server.respond(request.seq, 'source', { content: `// eval source ${args.sourceReference}`, mimeType: 'text/javascript' })
+    },
+  })
+  const { manager, fake } = buildManager(script)
+  const owner = {}
+  await runDebugAction(owner, { action: 'launch', program: '/w/app.js' }, manager, testLimits)
+  // stack_trace records the current frame with the reference.
+  await runDebugAction(owner, { action: 'stack_trace' }, manager, testLimits)
+  // source without explicit reference falls back to the frame's reference.
+  const auto = await runDebugAction(owner, { action: 'source' }, manager, testLimits)
+  assert.equal(auto.content, '// eval source 77')
+  const sent = fake.server.received.find(message => message.command === 'source')
+  assert.equal(sent.arguments.sourceReference, 77)
+  // Explicit reference overrides the frame.
+  const explicit = await runDebugAction(owner, { action: 'source', source_reference: 99 }, manager, testLimits)
+  assert.equal(explicit.content, '// eval source 99')
+  await manager.disposeAll()
+})
+
+test('variables and modules support start/count paging', async () => {
+  const allVariables = [
+    { name: 'v0', value: '0', variablesReference: 0 },
+    { name: 'v1', value: '1', variablesReference: 0 },
+    { name: 'v2', value: '2', variablesReference: 0 },
+  ]
+  const script = standardScript({
+    initialize: (server, request) =>
+      server.respond(request.seq, 'initialize', {
+        capabilities: { supportsConfigurationDoneRequest: true, supportsModulesRequest: true },
+      }),
+    variables: (server, request, args) => {
+      // Like a real adapter, honor start/count on the response side.
+      const start = args.start ?? 0
+      const count = args.count ?? allVariables.length
+      server.respond(request.seq, 'variables', { variables: allVariables.slice(start, start + count) })
+    },
+    modules: (server, request) =>
+      server.respond(request.seq, 'modules', {
+        modules: [{ id: 1, name: 'a' }, { id: 2, name: 'b' }],
+      }),
+  })
+  const { manager, fake } = buildManager(script)
+  const owner = {}
+  await runDebugAction(owner, { action: 'launch', program: '/w/app.py' }, manager, testLimits)
+  // variables with count pages the request and slices the result.
+  const variables = await runDebugAction(
+    owner,
+    { action: 'variables', variables_ref: 100, start: 1, count: 2 },
+    manager,
+    testLimits,
+  )
+  assert.deepEqual(variables.variables.map(v => v.name), ['v1', 'v2'])
+  const variablesMessage = fake.server.received.find(message => message.command === 'variables')
+  assert.equal(variablesMessage.arguments.start, 1)
+  assert.equal(variablesMessage.arguments.count, 2)
+  // modules paging passes startModule/moduleCount.
+  const modules = await runDebugAction(owner, { action: 'modules', start: 1, count: 5 }, manager, testLimits)
+  assert.equal(modules.modules.length, 2)
+  const modulesMessage = fake.server.received.find(message => message.command === 'modules')
+  assert.equal(modulesMessage.arguments.startModule, 1)
+  assert.equal(modulesMessage.arguments.moduleCount, 5)
+  await manager.disposeAll()
+})
+
+test('oversized variable and evaluation values are truncated in the data layer', async () => {
+  const huge = 'x'.repeat(5000)
+  const script = standardScript({
+    variables: (server, request) =>
+      server.respond(request.seq, 'variables', {
+        variables: [{ name: 'big', value: huge, variablesReference: 0 }],
+      }),
+    evaluate: (server, request) => server.respond(request.seq, 'evaluate', { result: huge, variablesReference: 0 }),
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await runDebugAction(owner, { action: 'launch', program: '/w/app.py' }, manager, testLimits)
+  const variables = await runDebugAction(owner, { action: 'variables', variables_ref: 100 }, manager, testLimits)
+  assert.ok(variables.variables[0].value.length < huge.length)
+  assert.match(variables.variables[0].value, /5000 chars/)
+  const evaluation = await runDebugAction(owner, { action: 'evaluate', expression: 'big' }, manager, testLimits)
+  assert.ok(evaluation.evaluation.result.length < huge.length)
+  assert.match(evaluation.evaluation.result, /5000 chars/)
+  await manager.disposeAll()
+})
+
+test('select_thread switches the focus thread', async () => {
+  const script = standardScript({
+    threads: (server, request) =>
+      server.respond(request.seq, 'threads', { threads: [{ id: 1, name: 'main' }, { id: 2, name: 'worker' }] }),
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await runDebugAction(owner, { action: 'launch', program: '/w/app.py' }, manager, testLimits)
+  // select_thread requires thread_id and switches the active thread.
+  await assert.rejects(runDebugAction(owner, { action: 'select_thread' }, manager, testLimits), /requires 'thread_id'/)
+  const selected = await runDebugAction(owner, { action: 'select_thread', thread_id: 2 }, manager, testLimits)
+  assert.equal(selected.snapshot.threadId, 2)
+  // Unknown threads are rejected.
+  await assert.rejects(
+    runDebugAction(owner, { action: 'select_thread', thread_id: 99 }, manager, testLimits),
+    /Thread 99 does not exist/,
+  )
+  await manager.disposeAll()
+})
+
+test('allThreadsStopped is surfaced in the snapshot', async () => {
+  const script = standardScript({
+    continue: (server, request) => {
+      server.respond(request.seq, 'continue', { allThreadsContinued: false })
+      setTimeout(() => server.emit('stopped', { reason: 'breakpoint', threadId: 1, allThreadsStopped: true }), 5)
+    },
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await runDebugAction(owner, { action: 'launch', program: '/w/app.py', stop_on_entry: false }, manager, testLimits)
+  const stepped = await runDebugAction(owner, { action: 'continue' }, manager, testLimits)
+  assert.equal(stepped.snapshot.allThreadsStopped, true)
+  await manager.disposeAll()
+})
+
+test('resume results carry incremental output since the last read', async () => {
+  const script = standardScript({
+    continue: (server, request) => {
+      server.respond(request.seq, 'continue')
+      server.emit('output', { category: 'stdout', output: 'hello from debuggee\n' })
+      setTimeout(() => server.emit('stopped', { reason: 'breakpoint', threadId: 1 }), 5)
+    },
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await runDebugAction(owner, { action: 'launch', program: '/w/app.py', stop_on_entry: false }, manager, testLimits)
+  // First resume: the output emitted during the run is attached.
+  const first = await runDebugAction(owner, { action: 'continue' }, manager, testLimits)
+  assert.equal(first.output.text, 'hello from debuggee\n')
+  // Second resume without new output: nothing attached.
+  const script2 = standardScript({ continue: (server, request) => server.respond(request.seq, 'continue') })
+  const manager2 = buildManager(script2).manager
+  const owner2 = {}
+  await runDebugAction(owner2, { action: 'launch', program: '/w/app.py', stop_on_entry: false }, manager2, testLimits)
+  const second = await runDebugAction(owner2, { action: 'continue' }, manager2, testLimits)
+  assert.equal(second.output, undefined)
+  await manager.disposeAll()
+  await manager2.disposeAll()
+})
+
+test('execute normalizes transport errors into stable DebugError codes', async () => {
+  // Drive through createDebugTool.execute so the normalizeError wrapper runs.
+  const { createDebugTool } = await import('../lib/tool.js')
+  const { manager } = buildManager(standardScript())
+  const exec = { agent: {} }
+  // Adapter request failure surfaces as adapter_error.
+  const failScript = standardScript({ continue: (server, request) => server.fail(request.seq, 'continue', 'boom') })
+  const failManager = buildManager(failScript).manager
+  const failTool = createDebugTool(failManager, testLimits)
+  await failTool.execute({ action: 'launch', program: '/w/app.py', stop_on_entry: false }, exec)
+  try {
+    await failTool.execute({ action: 'continue' }, exec)
+    assert.fail('expected adapter_error')
+  } catch (error) {
+    assert.ok(error instanceof DebugError)
+    assert.equal(error.code, 'adapter_error')
+    assert.match(error.message, /boom/)
+  }
+  await failManager.disposeAll()
   await manager.disposeAll()
 })

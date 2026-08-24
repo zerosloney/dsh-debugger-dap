@@ -16,12 +16,20 @@ export interface AdapterSpec {
      * `stopOnEntry`; netcoredbg uses `stopAtEntry`.
      */
     stopOnEntryKey?: string;
+    /**
+     * Standard DAP exception filter → adapter-specific filter name. E.g.
+     * debugpy has no 'all' filter (its filters are raised/uncaught/userUnhandled),
+     * so the recipe maps 'all' → 'raised'. Unknown filters pass through.
+     */
+    exceptionFilterMap?: Record<string, string>;
     /** Transport layer. Default `'stdio'`; `'tcp'` means the adapter is reached over TCP. */
     transport?: 'stdio' | 'tcp';
     /** Target host for `'tcp'` transport (default `'127.0.0.1'`). */
     host?: string;
     /** Target port for `'tcp'` transport. */
     port?: number;
+    /** Regex (string or RegExp) matching the adapter's port announcement on stdout, one capture group for the port. Used when the TCP port is discovered. */
+    portPattern?: string | RegExp;
 }
 /** One `adapters` config row. */
 export interface AdapterConfigEntry {
@@ -37,6 +45,10 @@ export interface AdapterConfigEntry {
     connectHost?: string;
     /** TCP connect port. Required when transport is 'tcp'. */
     connectPort?: number;
+    /** Regex (string) matching the adapter's port announcement on stdout, one capture group for the port. Used when transport is 'tcp' without connectPort. */
+    portPattern?: string;
+    /** Standard DAP exception filter → adapter-specific filter name (e.g. debugpy: { all: 'raised' }). */
+    exceptionFilterMap?: Record<string, string>;
 }
 /** A recipe: id, command line, and how to probe availability. */
 export interface AdapterRecipe {
@@ -51,6 +63,8 @@ export interface AdapterRecipe {
     launchArgs?: Record<string, unknown>;
     /** `launch` field that carries the stop-on-entry control (default `stopOnEntry`). */
     stopOnEntryKey?: string;
+    /** Standard DAP exception filter → adapter-specific filter name (e.g. debugpy: { all: 'raised' }). */
+    exceptionFilterMap?: Record<string, string>;
     /** Transport layer for this recipe: 'stdio' (default) or 'tcp'. */
     transport?: 'stdio' | 'tcp';
     /** Config row replacing the built-in definition, when present. */

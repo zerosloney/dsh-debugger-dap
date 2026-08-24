@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { resolveAdapter, AdapterUnavailableError } from '../lib/adapters.js'
+import { resolveAdapter } from '../lib/adapters.js'
 
 const pythonPresent = command => command === 'python'
 const nothing = () => false

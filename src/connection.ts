@@ -59,6 +59,8 @@ export class DapConnection {
   private readonly requestTimeoutMs: number
   private closed = false
   private closeReason: string | undefined
+  private lastResponseAt = Date.now()
+  private stalled = false
 
   constructor(
     private readonly transport: DapTransport,
@@ -74,6 +76,11 @@ export class DapConnection {
   /** Whether the adapter connection has closed; further sends reject. */
   get isClosed(): boolean {
     return this.closed
+  }
+
+  /** Whether the adapter stopped responding entirely (likely hung). */
+  get isStalled(): boolean {
+    return this.stalled
   }
 
   /**
@@ -98,6 +105,10 @@ export class DapConnection {
           detachAbort(pending)
           const error = new Error(`DAP ${command} timed out after ${timeoutMs}ms`)
           error.name = 'TimeoutError'
+          // A timed-out request with no response traffic at all (and a live
+          // connection) suggests a hung adapter: flag it so the caller can
+          // advise disconnecting instead of retrying.
+          if (!this.closed && Date.now() - this.lastResponseAt >= timeoutMs) this.stalled = true
           reject(error)
         }, timeoutMs)
       }
@@ -163,11 +174,12 @@ export class DapConnection {
     }
     if (classified.type === 'event') {
       const handlers = this.eventHandlers.get(classified.event)
-      if (handlers !== undefined) for (const handler of [...handlers]) handler(classified.body)
+      if (handlers !== undefined) for (const handler of Array.from(handlers)) handler(classified.body)
     }
   }
 
   private settle(response: DapResponse): void {
+    this.lastResponseAt = Date.now()
     const seq = response.request_seq
     if (seq === undefined) return
     const pending = this.pending.get(seq)
@@ -197,7 +209,7 @@ export class DapConnection {
       pending.reject(new DapDisconnectedError(reason))
     }
     this.pending.clear()
-    for (const handler of [...this.closeHandlers]) handler()
+    for (const handler of Array.from(this.closeHandlers)) handler()
     this.transport.close()
   }
 }
@@ -213,17 +225,50 @@ export interface SpawnedAdapter {
 
 const STDERR_TAIL_BYTES = 8 * 1024
 
+/** Grace before escalating a POSIX SIGTERM to SIGKILL. */
+const KILL_GRACE_MS = 2000
+
+/**
+ * Kill the process tree rooted at `child` on Windows. `taskkill /T` walks the
+ * parent-child relationships, so the adapter's own debuggee children die too.
+ */
+function taskkillTree(child: ChildProcess): Promise<void> {
+  return new Promise<void>(resolve => {
+    const pid = child.pid
+    if (pid === undefined) {
+      resolve()
+      return
+    }
+    const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+    killer.on('exit', () => resolve())
+    killer.on('error', () => {
+      // taskkill unavailable (unusual): fall back to a plain kill of the adapter.
+      try {
+        child.kill()
+      } catch {
+        // already gone
+      }
+      resolve()
+    })
+  })
+}
+
 /** Spawn one child, collect its stderr tail, and return a kill handle. */
 function spawnChildProcess(
   argv: readonly string[],
   options: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal } = {},
 ): { child: ChildProcess; stderrTail: () => string; kill: () => Promise<void> } {
   const [command, ...args] = argv
+  // POSIX: run the adapter in its own process group so killing the group also
+  // kills the debuggee tree it spawned. Windows has no process groups; tree
+  // kill goes through `taskkill /T` instead.
+  const detached = process.platform !== 'win32'
   const child: ChildProcess = spawn(command, args, {
     cwd: options.cwd,
     env: options.env === undefined ? process.env : { ...process.env, ...options.env },
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
+    detached,
   })
   let stderrTail = ''
   child.stderr?.on('data', (chunk: Buffer) => {
@@ -232,10 +277,52 @@ function spawnChildProcess(
   let exitWaiter: Promise<void> | undefined
   const kill = async (): Promise<void> => {
     if (child.exitCode !== null || child.signalCode !== null) return
-    child.kill()
+    if (detached) {
+      // Terminate the whole process group; individual fallback if the group
+      // signal cannot be delivered (e.g. the child already reaped).
+      try {
+        process.kill(-child.pid!, 'SIGTERM')
+      } catch {
+        try {
+          child.kill()
+        } catch {
+          // already gone
+        }
+      }
+    } else if (process.platform === 'win32') {
+      await taskkillTree(child)
+    } else {
+      child.kill()
+    }
     if (exitWaiter === undefined) {
       exitWaiter = new Promise<void>(resolve => {
-        child.once('exit', () => resolve())
+        let settled = false
+        const done = (): void => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          resolve()
+        }
+        const timer = setTimeout(() => {
+          // Grace passed: escalate to SIGKILL (POSIX group / direct).
+          if (detached) {
+            try {
+              process.kill(-child.pid!, 'SIGKILL')
+            } catch {
+              // already gone
+            }
+          } else {
+            try {
+              child.kill('SIGKILL')
+            } catch {
+              // already gone
+            }
+          }
+          // Give the kill a moment to land, then settle regardless so the
+          // caller never hangs on a zombie that ignores signals.
+          setTimeout(done, 500)
+        }, KILL_GRACE_MS)
+        child.once('exit', done)
       })
     }
     await exitWaiter
@@ -279,7 +366,7 @@ import type { AdapterSpec } from './adapters.js'
  * and a plain value for stdio transports.
  */
 export function spawnAdapter(
-  spec: Pick<AdapterSpec, 'command' | 'args' | 'env' | 'cwd' | 'transport' | 'host' | 'port'>,
+  spec: Pick<AdapterSpec, 'command' | 'args' | 'env' | 'cwd' | 'transport' | 'host' | 'port' | 'portPattern'>,
   options: {
     requestTimeoutMs?: number
     maxBodyBytes?: number
@@ -288,9 +375,14 @@ export function spawnAdapter(
 ): SpawnedAdapter | Promise<SpawnedAdapter> {
   if (spec.transport === 'tcp') {
     if (spec.port !== undefined && spec.port > 0) {
-      return spawnTcpAdapter({
+      // Explicit port: spawn the configured adapter command and connect to the
+      // port it listens on. The command/args are honored here — the adapter
+      // child is the one that binds the port.
+      return spawnTcpAdapterWithPort([spec.command, ...spec.args], {
         host: spec.host,
         port: spec.port,
+        cwd: spec.cwd,
+        env: spec.env,
         requestTimeoutMs: options.requestTimeoutMs,
         maxBodyBytes: options.maxBodyBytes,
         signal: options.signal,
@@ -302,6 +394,7 @@ export function spawnAdapter(
       host: spec.host,
       cwd: spec.cwd,
       env: spec.env,
+      portPattern: spec.portPattern,
       requestTimeoutMs: options.requestTimeoutMs,
       maxBodyBytes: options.maxBodyBytes,
       signal: options.signal,
@@ -323,16 +416,16 @@ export function childProcessTransport(child: ChildProcess): DapTransport {
   const closeListeners = new Set<() => void>()
   let closed = false
   child.stdout?.on('data', (chunk: Buffer) => {
-    for (const listener of [...dataListeners]) listener(chunk)
+    for (const listener of Array.from(dataListeners)) listener(chunk)
   })
   child.stderr?.on('data', () => {})
   child.on('error', error => {
-    for (const listener of [...errorListeners]) listener(error)
+    for (const listener of Array.from(errorListeners)) listener(error)
   })
   child.on('close', () => {
     if (closed) return
     closed = true
-    for (const listener of [...closeListeners]) listener()
+    for (const listener of Array.from(closeListeners)) listener()
   })
   return {
     write(chunk: Buffer): void {
@@ -389,16 +482,16 @@ export function tcpTransport(socket: NetSocket, options?: TcpTransportOptions): 
   const closeListeners = new Set<() => void>()
   let closed = false
   socket.on('data', (chunk: Buffer) => {
-    for (const listener of [...dataListeners]) listener(chunk)
+    for (const listener of Array.from(dataListeners)) listener(chunk)
   })
   socket.on('error', error => {
-    for (const listener of [...errorListeners]) listener(error)
+    for (const listener of Array.from(errorListeners)) listener(error)
   })
   socket.on('close', hadError => {
     if (closed) return
     closed = true
     options?.onDisconnect?.(hadError ? 'error' : 'close')
-    for (const listener of [...closeListeners]) listener()
+    for (const listener of Array.from(closeListeners)) listener()
   })
   // Notify as soon as the TCP handshake completes.
   socket.on('connect', () => options?.onConnect?.(socket))
@@ -444,14 +537,11 @@ export interface TcpSpawnOptions {
 }
 
 /**
- * Connect to a DAP adapter over TCP (e.g. js-debug, codelldb in TCP mode) and
- * wrap it in a {@link DapConnection}.  Unlike {@link spawnDapAdapter}, no
- * child process is spawned — the adapter must already be listening on `port`.
- *
- * For adapters that bundle a `launch` command internally (e.g. codelldb
- * started with a listener port) prefer spawning the adapter as a child
- * process and connecting to the port it opens; this function only handles the
- * transport layer.
+ * Connect to an already-listening DAP adapter over TCP (e.g. a server started
+ * outside this plugin) and wrap it in a {@link DapConnection}. No child is
+ * spawned here; to launch a configured adapter command and connect to its
+ * port, use {@link spawnAdapter} (tcp transport) or
+ * {@link spawnTcpAdapterWithPort}.
  */
 export function spawnTcpAdapter(options: TcpSpawnOptions): Promise<SpawnedAdapter> {
   return new Promise<SpawnedAdapter>((resolve, reject) => {
@@ -480,6 +570,94 @@ export function spawnTcpAdapter(options: TcpSpawnOptions): Promise<SpawnedAdapte
   })
 }
 
+/** Options for {@link spawnTcpAdapterWithPort}. */
+export interface TcpPortOptions {
+  host?: string
+  port: number
+  cwd?: string
+  env?: Record<string, string>
+  /** How long to wait for the child to accept connections on `port`. */
+  connectTimeoutMs?: number
+  requestTimeoutMs?: number
+  maxBodyBytes?: number
+  signal?: AbortSignal
+}
+
+/**
+ * Spawn one TCP DAP adapter child and connect to its fixed port. Unlike
+ * {@link spawnTcpAdapter}, the configured command is actually launched: the
+ * adapter may take a moment to bind, so connection attempts retry until the
+ * child is listening, exits, or the deadline passes. Teardown kills the child
+ * and closes the socket.
+ */
+export function spawnTcpAdapterWithPort(
+  argv: readonly string[],
+  options: TcpPortOptions,
+): Promise<SpawnedAdapter> {
+  return new Promise<SpawnedAdapter>((resolve, reject) => {
+    const { child, stderrTail, kill } = spawnChildProcess(argv, options)
+    const host = options.host ?? '127.0.0.1'
+    const port = options.port
+    const connectTimeoutMs = options.connectTimeoutMs ?? options.requestTimeoutMs ?? 30_000
+    let settled = false
+    let socket: NetSocket | undefined
+
+    const fail = (error: Error, killFirst = false): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(overallTimer)
+      if (killFirst) void kill().then(() => reject(error))
+      else reject(error)
+    }
+
+    const overallTimer = setTimeout(() => {
+      const tail = stderrTail().trim()
+      const detail = tail.length > 0 ? ` Adapter stderr: ${tail.slice(-800)}` : ''
+      fail(new Error(`Timed out waiting for the adapter to accept connections on ${host}:${port}.${detail}`), true)
+    }, connectTimeoutMs)
+
+    // Spawn failure (e.g. ENOENT): nothing to kill, reject immediately.
+    child.on('error', error => fail(error))
+    // The child died before accepting connections: surface stderr.
+    child.on('exit', code => {
+      const tail = stderrTail().trim()
+      const detail = tail.length > 0 ? ` Adapter stderr: ${tail.slice(-800)}` : ''
+      fail(new Error(`Debug adapter exited (code ${code ?? 'unknown'}) before accepting connections on ${host}:${port}.${detail}`))
+    })
+
+    function tryConnect(): void {
+      if (settled) return
+      socket = netConnect(port, host)
+      socket.once('connect', () => {
+        if (settled) return
+        settled = true
+        clearTimeout(overallTimer)
+        const transport = tcpTransport(socket!, { host, port })
+        const connection = new DapConnection(transport, {
+          requestTimeoutMs: options.requestTimeoutMs,
+          maxBodyBytes: options.maxBodyBytes,
+        })
+        resolve({
+          connection,
+          kill: () =>
+            new Promise<void>(res => {
+              socket?.destroy()
+              void kill().then(res)
+            }),
+          stderrTail,
+        })
+      })
+      socket.once('error', () => {
+        // Not listening yet: destroy and retry shortly (the overall timer is
+        // the backstop, and the child-exit handler settles on early death).
+        socket?.destroy()
+        if (!settled) setTimeout(tryConnect, 50)
+      })
+    }
+    tryConnect()
+  })
+}
+
 /** Options for {@link spawnTcpAdapterWithDiscovery}. */
 export interface TcpDiscoveryOptions {
   host?: string
@@ -490,9 +668,11 @@ export interface TcpDiscoveryOptions {
   requestTimeoutMs?: number
   maxBodyBytes?: number
   signal?: AbortSignal
+  /** Regex (string or RegExp) matching the adapter's port announcement, with one capture group for the port. Default: /Listening on port (\d+)/. */
+  portPattern?: string | RegExp
 }
 
-const PORT_ANNOUNCE_PATTERN = /Listening on port (\d+)/
+const DEFAULT_PORT_ANNOUNCE_PATTERN = /Listening on port (\d+)/
 
 /**
  * Spawn a TCP DAP adapter child process and discover its listening port from
@@ -507,6 +687,12 @@ export function spawnTcpAdapterWithDiscovery(
   return new Promise<SpawnedAdapter>((resolve, reject) => {
     const { child, stderrTail, kill } = spawnChildProcess(argv, options)
     const host = options.host ?? '127.0.0.1'
+    const portPattern =
+      options.portPattern === undefined
+        ? DEFAULT_PORT_ANNOUNCE_PATTERN
+        : options.portPattern instanceof RegExp
+          ? options.portPattern
+          : new RegExp(options.portPattern)
     const discoveryTimer = setTimeout(() => {
       const tail = stderrTail().trim()
       const detail = tail.length > 0 ? ` Adapter stderr: ${tail.slice(-800)}` : ''
@@ -514,9 +700,16 @@ export function spawnTcpAdapterWithDiscovery(
     }, options.discoveryTimeoutMs ?? 30_000)
     let stdoutBuffer = ''
     let settled = false
+    // Spawn failure (e.g. ENOENT): nothing to kill, reject immediately.
+    child.on('error', error => {
+      if (settled) return
+      settled = true
+      clearTimeout(discoveryTimer)
+      reject(error)
+    })
     child.stdout?.on('data', (chunk: Buffer) => {
       stdoutBuffer = (stdoutBuffer + chunk.toString('utf8')).slice(-64 * 1024)
-      const match = PORT_ANNOUNCE_PATTERN.exec(stdoutBuffer)
+      const match = portPattern.exec(stdoutBuffer)
       if (match === null || settled) return
       settled = true
       clearTimeout(discoveryTimer)

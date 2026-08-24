@@ -35,12 +35,16 @@ export declare class DapConnection {
     private readonly requestTimeoutMs;
     private closed;
     private closeReason;
+    private lastResponseAt;
+    private stalled;
     constructor(transport: DapTransport, options?: {
         requestTimeoutMs?: number;
         maxBodyBytes?: number;
     });
     /** Whether the adapter connection has closed; further sends reject. */
     get isClosed(): boolean;
+    /** Whether the adapter stopped responding entirely (likely hung). */
+    get isStalled(): boolean;
     /**
      * Send one request and resolve with the success body. Rejects with
      * {@link DapRequestError} on a DAP failure, {@link DapDisconnectedError}
@@ -87,7 +91,7 @@ import type { AdapterSpec } from './adapters.js';
  * Returns a promise for TCP transports (needed for async socket connection)
  * and a plain value for stdio transports.
  */
-export declare function spawnAdapter(spec: Pick<AdapterSpec, 'command' | 'args' | 'env' | 'cwd' | 'transport' | 'host' | 'port'>, options: {
+export declare function spawnAdapter(spec: Pick<AdapterSpec, 'command' | 'args' | 'env' | 'cwd' | 'transport' | 'host' | 'port' | 'portPattern'>, options: {
     requestTimeoutMs?: number;
     maxBodyBytes?: number;
     signal?: AbortSignal;
@@ -127,16 +131,33 @@ export interface TcpSpawnOptions {
     signal?: AbortSignal;
 }
 /**
- * Connect to a DAP adapter over TCP (e.g. js-debug, codelldb in TCP mode) and
- * wrap it in a {@link DapConnection}.  Unlike {@link spawnDapAdapter}, no
- * child process is spawned — the adapter must already be listening on `port`.
- *
- * For adapters that bundle a `launch` command internally (e.g. codelldb
- * started with a listener port) prefer spawning the adapter as a child
- * process and connecting to the port it opens; this function only handles the
- * transport layer.
+ * Connect to an already-listening DAP adapter over TCP (e.g. a server started
+ * outside this plugin) and wrap it in a {@link DapConnection}. No child is
+ * spawned here; to launch a configured adapter command and connect to its
+ * port, use {@link spawnAdapter} (tcp transport) or
+ * {@link spawnTcpAdapterWithPort}.
  */
 export declare function spawnTcpAdapter(options: TcpSpawnOptions): Promise<SpawnedAdapter>;
+/** Options for {@link spawnTcpAdapterWithPort}. */
+export interface TcpPortOptions {
+    host?: string;
+    port: number;
+    cwd?: string;
+    env?: Record<string, string>;
+    /** How long to wait for the child to accept connections on `port`. */
+    connectTimeoutMs?: number;
+    requestTimeoutMs?: number;
+    maxBodyBytes?: number;
+    signal?: AbortSignal;
+}
+/**
+ * Spawn one TCP DAP adapter child and connect to its fixed port. Unlike
+ * {@link spawnTcpAdapter}, the configured command is actually launched: the
+ * adapter may take a moment to bind, so connection attempts retry until the
+ * child is listening, exits, or the deadline passes. Teardown kills the child
+ * and closes the socket.
+ */
+export declare function spawnTcpAdapterWithPort(argv: readonly string[], options: TcpPortOptions): Promise<SpawnedAdapter>;
 /** Options for {@link spawnTcpAdapterWithDiscovery}. */
 export interface TcpDiscoveryOptions {
     host?: string;
@@ -147,6 +168,8 @@ export interface TcpDiscoveryOptions {
     requestTimeoutMs?: number;
     maxBodyBytes?: number;
     signal?: AbortSignal;
+    /** Regex (string or RegExp) matching the adapter's port announcement, with one capture group for the port. Default: /Listening on port (\d+)/. */
+    portPattern?: string | RegExp;
 }
 /**
  * Spawn a TCP DAP adapter child process and discover its listening port from

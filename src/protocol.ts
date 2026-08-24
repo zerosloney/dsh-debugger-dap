@@ -151,6 +151,7 @@ export function readThreads(body: Record<string, unknown> | undefined): DapThrea
 export interface DapSource {
   path?: string
   name?: string
+  sourceReference?: number
 }
 
 export interface DapStackFrame {
@@ -185,7 +186,11 @@ export function readStackFrames(body: Record<string, unknown> | undefined): DapS
 function readSourceRef(value: unknown): DapSource | undefined {
   if (value === null || typeof value !== 'object') return undefined
   const record = value as Record<string, unknown>
-  return { path: readString(record.path), name: readString(record.name) }
+  return {
+    path: readString(record.path),
+    name: readString(record.name),
+    sourceReference: readNumber(record.sourceReference),
+  }
 }
 
 export interface DapScope {
@@ -341,6 +346,7 @@ export function readSource(body: Record<string, unknown> | undefined): DapSource
 export interface DapLoadedSource {
   path?: string
   name?: string
+  sourceReference?: number
 }
 
 export function readLoadedSources(body: Record<string, unknown> | undefined): DapLoadedSource[] {
@@ -350,7 +356,11 @@ export function readLoadedSources(body: Record<string, unknown> | undefined): Da
   for (const item of raw) {
     if (item === null || typeof item !== 'object') continue
     const record = item as Record<string, unknown>
-    sources.push({ path: readString(record.path), name: readString(record.name) })
+    sources.push({
+      path: readString(record.path),
+      name: readString(record.name),
+      sourceReference: readNumber(record.sourceReference),
+    })
   }
   return sources
 }

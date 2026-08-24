@@ -16,5 +16,9 @@
         maxVariables: 100
         # 渲染给模型的文本结果总上限（字符）
         maxResultChars: 16000
+        # 会话台账（JSONL）路径；留空 = ~/.dsh-debugger-dap/ledger.jsonl
+        ledgerPath: ''
+        # 台账文件大小上限；超限轮转到 <path>.1
+        ledgerMaxBytes: 5242880
         # 追加/覆盖内置适配器配方（debugpy、dlv）
         adapters: {}
