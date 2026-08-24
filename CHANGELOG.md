@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.6] - 2026-08-24
 
 ### Added
 
@@ -100,5 +100,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Deferred start response (debugpy-style) no longer deadlocks the handshake.
 
-[Unreleased]: https://github.com/dsh-debugger-dap/dsh-debugger-dap/compare/v0.1.3...HEAD
-[0.1.3]: https://github.com/dsh-debugger-dap/dsh-debugger-dap/releases/tag/v0.1.3
+[Unreleased]: https://github.com/zerosloney/dsh-debugger-dap/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/zerosloney/dsh-debugger-dap/releases/tag/v0.1.6
+[0.1.5]: https://github.com/zerosloney/dsh-debugger-dap/releases/tag/v0.1.5
+[0.1.4]: https://github.com/zerosloney/dsh-debugger-dap/releases/tag/v0.1.4
+[0.1.3]: https://github.com/zerosloney/dsh-debugger-dap/releases/tag/v0.1.3
