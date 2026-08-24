@@ -84,6 +84,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Lint warnings cleared: the four unused `previousStatus` locals are now the
   actual restore mechanism, and a leftover noop expression in the ledger
   query test was replaced with real temp-file cleanup.
+- **examples/**：新增 `examples/debuggee_prod.py` 与 `examples/README.md`——
+  真实 dsh headless 会话中定位断言失败的完整可复现样本（经 0.1.5 实测：
+  模型用 `debug` 工具 launch→断点→4 次命中→逐次读值→定位 `33 ≠ 34` 根因），
+  与 `test/fixtures/` 的单元测试夹具区分开。
 
 ## [0.1.3] - 2026-02-22
 
