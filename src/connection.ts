@@ -366,7 +366,7 @@ import type { AdapterSpec } from './adapters.js'
  * and a plain value for stdio transports.
  */
 export function spawnAdapter(
-  spec: Pick<AdapterSpec, 'command' | 'args' | 'env' | 'cwd' | 'transport' | 'host' | 'port' | 'portPattern'>,
+  spec: Pick<AdapterSpec, 'command' | 'args' | 'env' | 'cwd' | 'transport' | 'host' | 'port' | 'portPattern' | 'announceStream'>,
   options: {
     requestTimeoutMs?: number
     maxBodyBytes?: number
@@ -395,6 +395,7 @@ export function spawnAdapter(
       cwd: spec.cwd,
       env: spec.env,
       portPattern: spec.portPattern,
+      announceStream: spec.announceStream,
       requestTimeoutMs: options.requestTimeoutMs,
       maxBodyBytes: options.maxBodyBytes,
       signal: options.signal,
@@ -663,13 +664,17 @@ export interface TcpDiscoveryOptions {
   host?: string
   cwd?: string
   env?: Record<string, string>
-  /** How long to wait for the adapter to announce its port on stdout. */
+  /** How long to wait for the adapter to announce its port on stdout/stderr. */
   discoveryTimeoutMs?: number
+  /** How long to keep retrying the TCP connect after the port is announced (default: `requestTimeoutMs` ?? 30s). */
+  connectTimeoutMs?: number
   requestTimeoutMs?: number
   maxBodyBytes?: number
   signal?: AbortSignal
   /** Regex (string or RegExp) matching the adapter's port announcement, with one capture group for the port. Default: /Listening on port (\d+)/. */
   portPattern?: string | RegExp
+  /** Which child stream(s) carry the port announcement (default `'both'`; `'stdout'` pins the old behavior). */
+  announceStream?: 'stdout' | 'stderr' | 'both'
 }
 
 const DEFAULT_PORT_ANNOUNCE_PATTERN = /Listening on port (\d+)/
@@ -677,7 +682,9 @@ const DEFAULT_PORT_ANNOUNCE_PATTERN = /Listening on port (\d+)/
 /**
  * Spawn a TCP DAP adapter child process and discover its listening port from
  * stdout, then connect (e.g. codelldb started with `--port 0`, which prints
- * "Listening on port <N>"). The child's stderr is collected for failure
+ * "Listening on port <N>"). Connection attempts retry until the announced
+ * port accepts, the child dies, or the deadline passes — an announcement can
+ * precede the actual bind. The child's stderr is collected for failure
  * diagnostics; teardown kills the child and closes the socket.
  */
 export function spawnTcpAdapterWithDiscovery(
@@ -693,45 +700,63 @@ export function spawnTcpAdapterWithDiscovery(
         : options.portPattern instanceof RegExp
           ? options.portPattern
           : new RegExp(options.portPattern)
-    const discoveryTimer = setTimeout(() => {
-      const tail = stderrTail().trim()
-      const detail = tail.length > 0 ? ` Adapter stderr: ${tail.slice(-800)}` : ''
-      void kill().then(() => reject(new Error(`Timed out waiting for the adapter to announce its port on stdout.${detail}`)))
-    }, options.discoveryTimeoutMs ?? 30_000)
-    let stdoutBuffer = ''
     let settled = false
-    // Spawn failure (e.g. ENOENT): nothing to kill, reject immediately.
-    child.on('error', error => {
-      if (settled) return
-      settled = true
-      clearTimeout(discoveryTimer)
-      reject(error)
-    })
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdoutBuffer = (stdoutBuffer + chunk.toString('utf8')).slice(-64 * 1024)
-      const match = portPattern.exec(stdoutBuffer)
-      if (match === null || settled) return
-      settled = true
-      clearTimeout(discoveryTimer)
-      const port = Number(match[1])
-      connect(port)
-    })
-    child.on('exit', code => {
-      if (settled) return
-      settled = true
-      clearTimeout(discoveryTimer)
+    const stderrDetail = (): string => {
       const tail = stderrTail().trim()
-      const detail = tail.length > 0 ? ` Adapter stderr: ${tail.slice(-800)}` : ''
-      reject(new Error(`Debug adapter exited (code ${code ?? 'unknown'}) before announcing its port.${detail}`))
+      return tail.length > 0 ? ` Adapter stderr: ${tail.slice(-800)}` : ''
+    }
+    const discoveryTimer = setTimeout(() => {
+      void kill().then(() =>
+        reject(new Error(`Timed out waiting for the adapter to announce its port on stdout.${stderrDetail()}`)),
+      )
+    }, options.discoveryTimeoutMs ?? 30_000)
+    let connectBackstop: ReturnType<typeof setTimeout> | undefined
+    const clearTimers = (): void => {
+      clearTimeout(discoveryTimer)
+      if (connectBackstop !== undefined) clearTimeout(connectBackstop)
+      connectBackstop = undefined
+    }
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      clearTimers()
+    }
+    /** Reject exactly once; killing the child is part of settlement. */
+    const fail = (error: Error, killFirst = true): void => {
+      if (settled) return
+      settled = true
+      clearTimers()
+      if (killFirst) void kill().then(() => reject(error))
+      else reject(error)
+    }
+    // Spawn failure (e.g. ENOENT): nothing to kill, reject immediately.
+    child.on('error', error => fail(error, false))
+    // Death at any phase — before or after the announcement — settles early,
+    // so an adapter that crashes right after printing its port surfaces its
+    // stderr instead of stalling until a timer.
+    child.on('exit', code => {
+      fail(
+        new Error(
+          `Debug adapter exited (code ${code ?? 'unknown'}) before accepting connections.${stderrDetail()}`,
+        ),
+      )
     })
-    function connect(port: number): void {
+    let stdoutBuffer = ''
+    /**
+     * Connect to the announced port, retrying briefly like the fixed-port
+     * path: some adapters print the announcement just before their listener
+     * is bound, so the first attempt can hit ECONNREFUSED. Child death
+     * settles via the exit handler; the deadline is the backstop.
+     */
+    function tryConnect(port: number, deadline: number): void {
+      if (settled) return
       const socket = netConnect(port, host)
-      const connectTimer = setTimeout(() => {
-        socket.destroy()
-        void kill().then(() => reject(new Error(`TCP connection to ${host}:${port} timed out`)))
-      }, options.requestTimeoutMs ?? 30_000)
-      socket.on('connect', () => {
-        clearTimeout(connectTimer)
+      socket.once('connect', () => {
+        if (settled) {
+          socket.destroy()
+          return
+        }
+        finish()
         const transport = tcpTransport(socket, { host, port })
         const connection = new DapConnection(transport, {
           requestTimeoutMs: options.requestTimeoutMs,
@@ -747,10 +772,40 @@ export function spawnTcpAdapterWithDiscovery(
           stderrTail,
         })
       })
-      socket.on('error', err => {
-        clearTimeout(connectTimer)
-        void kill().then(() => reject(err))
+      socket.once('error', () => {
+        socket.destroy()
+        if (settled) return
+        if (Date.now() >= deadline) {
+          fail(new Error(`Timed out connecting to ${host}:${port} after the adapter announced its port.${stderrDetail()}`))
+        } else {
+          setTimeout(() => tryConnect(port, deadline), 50)
+        }
       })
     }
+    let announced = false
+    const onAnnounceChunk = (chunk: Buffer): void => {
+      stdoutBuffer = (stdoutBuffer + chunk.toString('utf8')).slice(-64 * 1024)
+      const match = portPattern.exec(stdoutBuffer)
+      // The buffer keeps re-matching on later chunks: announce exactly once.
+      if (match === null || settled || announced) return
+      announced = true
+      // The announcement ends the discovery phase: only the connect window
+      // may bound the retries from here on, or a late discovery timer could
+      // kill the adapter while the bind is still completing.
+      clearTimeout(discoveryTimer)
+      const port = Number(match[1])
+      // Announcement received: swap the discovery window for the connect
+      // window, so a slow bind is bounded by its own deadline.
+      const windowMs = options.connectTimeoutMs ?? options.requestTimeoutMs ?? 30_000
+      connectBackstop = setTimeout(() => {
+        fail(new Error(`Timed out connecting to ${host}:${port} after the adapter announced its port.${stderrDetail()}`))
+      }, windowMs)
+      tryConnect(port, Date.now() + windowMs)
+    }
+    child.stdout?.on('data', onAnnounceChunk)
+    // Some adapters announce the port on stderr (e.g. `node --inspect`
+    // prints "Debugger listening on ws://..." there). Scan it too unless
+    // the caller pinned the stream.
+    if (options.announceStream !== 'stdout') child.stderr?.on('data', onAnnounceChunk)
   })
 }

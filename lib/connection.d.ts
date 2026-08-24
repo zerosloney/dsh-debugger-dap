@@ -91,7 +91,7 @@ import type { AdapterSpec } from './adapters.js';
  * Returns a promise for TCP transports (needed for async socket connection)
  * and a plain value for stdio transports.
  */
-export declare function spawnAdapter(spec: Pick<AdapterSpec, 'command' | 'args' | 'env' | 'cwd' | 'transport' | 'host' | 'port' | 'portPattern'>, options: {
+export declare function spawnAdapter(spec: Pick<AdapterSpec, 'command' | 'args' | 'env' | 'cwd' | 'transport' | 'host' | 'port' | 'portPattern' | 'announceStream'>, options: {
     requestTimeoutMs?: number;
     maxBodyBytes?: number;
     signal?: AbortSignal;
@@ -163,18 +163,24 @@ export interface TcpDiscoveryOptions {
     host?: string;
     cwd?: string;
     env?: Record<string, string>;
-    /** How long to wait for the adapter to announce its port on stdout. */
+    /** How long to wait for the adapter to announce its port on stdout/stderr. */
     discoveryTimeoutMs?: number;
+    /** How long to keep retrying the TCP connect after the port is announced (default: `requestTimeoutMs` ?? 30s). */
+    connectTimeoutMs?: number;
     requestTimeoutMs?: number;
     maxBodyBytes?: number;
     signal?: AbortSignal;
     /** Regex (string or RegExp) matching the adapter's port announcement, with one capture group for the port. Default: /Listening on port (\d+)/. */
     portPattern?: string | RegExp;
+    /** Which child stream(s) carry the port announcement (default `'both'`; `'stdout'` pins the old behavior). */
+    announceStream?: 'stdout' | 'stderr' | 'both';
 }
 /**
  * Spawn a TCP DAP adapter child process and discover its listening port from
  * stdout, then connect (e.g. codelldb started with `--port 0`, which prints
- * "Listening on port <N>"). The child's stderr is collected for failure
+ * "Listening on port <N>"). Connection attempts retry until the announced
+ * port accepts, the child dies, or the deadline passes — an announcement can
+ * precede the actual bind. The child's stderr is collected for failure
  * diagnostics; teardown kills the child and closes the socket.
  */
 export declare function spawnTcpAdapterWithDiscovery(argv: readonly string[], options?: TcpDiscoveryOptions): Promise<SpawnedAdapter>;

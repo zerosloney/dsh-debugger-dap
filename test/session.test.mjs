@@ -181,6 +181,48 @@ test('continue past the wait deadline reports running without killing the sessio
   await manager.disposeAll()
 })
 
+test('adapter-rejected continue restores the truthful stopped state', async () => {
+  // The adapter refuses the resume ("not stopped"): the session must fold
+  // back to `stopped` instead of leaving a lying `running` snapshot behind.
+  const script = standardScript({
+    continue: (server, request) => server.fail(request.seq, 'continue', 'cannot continue while running'),
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py' })
+  const session = manager.sessionFor(owner)
+  assert.equal(session.status, 'stopped')
+  await assert.rejects(session.resume('continue'), /cannot continue while running/)
+  assert.equal(session.status, 'stopped')
+  const snapshot = manager.list(owner)[0]
+  assert.equal(snapshot.status, 'stopped')
+  assert.equal(snapshot.stopReason, 'entry')
+  assert.equal(snapshot.frame?.line, 42)
+  await manager.disposeAll()
+})
+
+test('adapter-rejected restart restores the pre-restart location and thread', async () => {
+  const script = standardScript({
+    initialize: (server, request) =>
+      server.respond(request.seq, 'initialize', {
+        capabilities: { supportsConfigurationDoneRequest: true, supportsRestartRequest: true },
+      }),
+    restart: (server, request) => server.fail(request.seq, 'restart', 'restart refused'),
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py' })
+  const session = manager.sessionFor(owner)
+  await assert.rejects(session.restart(), /restart refused/)
+  assert.equal(session.status, 'stopped')
+  assert.equal(session.activeThreadId, 1)
+  assert.equal(session.currentFrame?.line, 42)
+  const snapshot = manager.list(owner)[0]
+  assert.equal(snapshot.status, 'stopped')
+  assert.equal(snapshot.stopReason, 'entry')
+  await manager.disposeAll()
+})
+
 test('terminated event ends the wait with exit code', async () => {
   const script = standardScript({
     continue: (server, request) => {

@@ -49,6 +49,57 @@ test('discovery rejects with stderr detail when the child exits early', async ()
   )
 })
 
+test('discovery retries connecting when the announcement precedes the bind', async () => {
+  // Some adapters print "Listening on port N" just before their listener is
+  // bound: the first connect hits ECONNREFUSED and discovery must retry
+  // until the announced port accepts, not fail the launch outright.
+  const net = await import('node:net')
+  const hint = await new Promise(resolve => {
+    const srv = net.createServer()
+    srv.listen(0, '127.0.0.1', () => {
+      const port = srv.address().port
+      srv.close(() => resolve(port))
+    })
+  })
+  const script = `
+const net = require('node:net')
+const port = Number(process.env.TEST_PORT)
+// Announce FIRST, bind ~300ms later: the first connect must be retried.
+console.log('Listening on port ' + port)
+setTimeout(() => {
+const server = net.createServer(socket => {
+let buf = Buffer.alloc(0)
+socket.on('data', chunk => {
+buf = Buffer.concat([buf, chunk])
+const headerEnd = buf.indexOf('\\r\\n\\r\\n')
+if (headerEnd === -1) return
+const match = /Content-Length: (\\d+)/.exec(buf.slice(0, headerEnd).toString())
+if (match === null) return
+const length = Number(match[1])
+const bodyStart = headerEnd + 4
+if (buf.length < bodyStart + length) return
+const message = JSON.parse(buf.slice(bodyStart, bodyStart + length).toString())
+const reply = { seq: 1, type: 'response', request_seq: message.seq, command: message.command, success: true }
+const body = Buffer.from(JSON.stringify(reply))
+socket.write(Buffer.concat([Buffer.from('Content-Length: ' + body.length + '\\r\\n\\r\\n'), body]))
+})
+})
+server.listen(port, '127.0.0.1', () => {})
+}, 300)
+`
+  const spawned = await spawnTcpAdapterWithDiscovery([process.execPath, '-e', script], {
+    discoveryTimeoutMs: 5000,
+    requestTimeoutMs: 5000,
+    env: { TEST_PORT: String(hint) },
+  })
+  try {
+    const reply = await spawned.connection.send('initialize', { adapterID: 'test' })
+    assert.deepEqual(reply, {})
+  } finally {
+    await spawned.kill()
+  }
+})
+
 test('discovery honors a custom port announcement pattern', async () => {
   // A child announcing its port in a non-codelldb format must be discovered
   // when the caller supplies a matching portPattern.
@@ -79,6 +130,45 @@ server.listen(0, '127.0.0.1', () => {
     discoveryTimeoutMs: 5000,
     requestTimeoutMs: 5000,
     portPattern: /DAP_PORT=(\d+)/,
+  })
+  try {
+    const reply = await spawned.connection.send('initialize', { adapterID: 'test' })
+    assert.deepEqual(reply, {})
+  } finally {
+    await spawned.kill()
+  }
+})
+
+test('discovery reads the port announcement from stderr by default', async () => {
+  // Some adapters announce on stderr (e.g. `node --inspect` prints
+  // "Debugger listening on ws://..."); discovery must scan both streams.
+  const script = `
+const net = require('node:net')
+const server = net.createServer(socket => {
+  let buf = Buffer.alloc(0)
+  socket.on('data', chunk => {
+    buf = Buffer.concat([buf, chunk])
+    const headerEnd = buf.indexOf('\\r\\n\\r\\n')
+    if (headerEnd === -1) return
+    const match = /Content-Length: (\\d+)/.exec(buf.slice(0, headerEnd).toString())
+    if (match === null) return
+    const length = Number(match[1])
+    const bodyStart = headerEnd + 4
+    if (buf.length < bodyStart + length) return
+    const message = JSON.parse(buf.slice(bodyStart, bodyStart + length).toString())
+    const reply = { seq: 1, type: 'response', request_seq: message.seq, command: message.command, success: true }
+    const body = Buffer.from(JSON.stringify(reply))
+    socket.write(Buffer.concat([Buffer.from('Content-Length: ' + body.length + '\\r\\n\\r\\n'), body]))
+  })
+})
+server.listen(0, '127.0.0.1', () => {
+  console.error('Debugger listening on ws://127.0.0.1:' + server.address().port + '/abcdef')
+})
+`
+  const spawned = await spawnTcpAdapterWithDiscovery([process.execPath, '-e', script], {
+    discoveryTimeoutMs: 5000,
+    requestTimeoutMs: 5000,
+    portPattern: /ws:\/\/[^:]+:(\d+)/,
   })
   try {
     const reply = await spawned.connection.send('initialize', { adapterID: 'test' })

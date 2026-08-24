@@ -1,7 +1,8 @@
 /**
  * Adapter recipes: built-in DAP adapters (debugpy, dlv, netcoredbg,
- * lldb-dap, js-debug, codelldb) plus config-declared rows, resolved
- * against PATH with actionable install hints.
+ * lldb-dap, codelldb) plus config-declared rows, resolved against PATH
+ * with actionable install hints. js-debug is intentionally config-only:
+ * it ships as a TCP DAP server script rather than a PATH command.
  */
 
 import { delimiter, isAbsolute, join } from 'node:path'
@@ -34,6 +35,8 @@ export interface AdapterSpec {
   port?: number
   /** Regex (string or RegExp) matching the adapter's port announcement on stdout, one capture group for the port. Used when the TCP port is discovered. */
   portPattern?: string | RegExp
+  /** Which child stream carries the port announcement: `'stdout'`, `'stderr'`, or `'both'` (default `'both'`). */
+  announceStream?: 'stdout' | 'stderr' | 'both'
 }
 
 /** One `adapters` config row. */
@@ -52,6 +55,8 @@ export interface AdapterConfigEntry {
   connectPort?: number
   /** Regex (string) matching the adapter's port announcement on stdout, one capture group for the port. Used when transport is 'tcp' without connectPort. */
   portPattern?: string
+  /** Which child stream carries the port announcement: 'stdout', 'stderr', or 'both' (default 'both'). */
+  announceStream?: 'stdout' | 'stderr' | 'both'
   /** Standard DAP exception filter → adapter-specific filter name (e.g. debugpy: { all: 'raised' }). */
   exceptionFilterMap?: Record<string, string>
 }
@@ -112,17 +117,13 @@ const BUILT_IN_RECIPES: readonly AdapterRecipe[] = [
       "adapter 'lldb-dap' is not available: install the LLVM DAP binary (llvm-dap, lldb-dap, or dap-server depending on your LLVM version) and ensure it is on PATH. On macOS with Xcode, you may need to build from https://llvm.org/git/dap.",
   },
   {
-    id: 'js-debug',
-    probeCommands: ['node'],
-    fixedArgs: [],
-    installHint:
-      "adapter 'js-debug' is not available: run 'npm install -g @vscode/js-debug' and ensure 'node' is on PATH. js-debug is also bundled with VS Code and the 'nodedebug' adapter.",
-    launchArgs: { type: 'node' },
-  },
-  {
     id: 'codelldb',
     probeCommands: ['codelldb'],
-    fixedArgs: ['dap', '--port', '0'],
+    // Verified against upstream's clap Cli struct (src/codelldb/src/lib.rs):
+    // only long options exist (--port/--connect/--liblldb/...), no positional
+    // argument and no subcommand — an extra 'dap' would make the binary exit
+    // with a usage error before listening.
+    fixedArgs: ['--port', '0'],
     installHint:
       "adapter 'codelldb' is not available: install the CodeLLDB extension (https://marketplace.visualstudio.com/items?itemName=vadimcn.vscode-lldb) and ensure the codelldb binary is on PATH, or configure the path in the 'adapters' plugin config.",
     // codelldb listens on a random high port when started with --port 0;
@@ -157,6 +158,17 @@ export function resolveAdapter(
   }
   const recipe = recipes.find(entry => entry.id === wanted)
   if (recipe === undefined) {
+    if (wanted === 'js-debug') {
+      // js-debug ships as a TCP DAP server script (dapDebugServer.js), not as
+      // a PATH binary, and is never published to npm (it is bundled with VS
+      // Code under extensions/ms-vscode.js-debug). No auto-resolvable
+      // built-in recipe exists, so fail fast with the exact config shape
+      // instead of spawning a bare `node` REPL that would hang until the
+      // request timeout.
+      throw new AdapterUnavailableError(
+        "adapter 'js-debug' has no built-in command: it is a VS Code-bundled TCP DAP server script, not an npm-installable binary. Declare it in the plugin's 'adapters' config, e.g. adapters: { 'js-debug': { command: 'node', args: ['<VS Code>/extensions/ms-vscode.js-debug/dist/src/dapDebugServer.js'], transport: 'tcp', connectPort: 12722 } }.",
+      )
+    }
     throw new AdapterUnavailableError(
       `Unknown adapter '${wanted}'. Declare it under the plugin's 'adapters' config or use a built-in id (${recipes
         .map(entry => entry.id)
@@ -213,6 +225,7 @@ function expandConfigEntry(entry: AdapterConfigEntry): AdapterSpec {
     host: entry.connectHost,
     port: entry.connectPort,
     portPattern: entry.portPattern,
+    announceStream: entry.announceStream,
   }
 }
 

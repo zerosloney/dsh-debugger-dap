@@ -85,3 +85,49 @@ test('an explicit netcoredbg config override inherits the recipe stopAtEntry key
   assert.deepEqual(spec.launchArgs, { type: 'coreclr' })
   assert.deepEqual(spec.args, [])
 })
+
+test('js-debug without a config fails fast with setup guidance instead of spawning bare node', () => {
+  // js-debug ships as a TCP DAP server script, not a PATH command: there is
+  // no auto-resolvable recipe. Resolution must reject immediately with the
+  // exact adapters-config shape, never resolve to a bare `node` REPL.
+  assert.throws(
+    () => resolveAdapter({ program: '/w/server.js' }, undefined, pythonPresent),
+    /dapDebugServer\.js[\s\S]*transport: 'tcp'/,
+  )
+  assert.throws(
+    () => resolveAdapter({ adapter: 'js-debug', program: '/w/x' }, undefined, nothing),
+    /no built-in command/,
+  )
+  // A declared config row still resolves after the built-in removal.
+  const config = { 'js-debug': { command: 'node', args: ['/opt/js-debug/src/dapDebugServer.js'], transport: 'tcp' } }
+  const spec = resolveAdapter({ program: '/w/server.js' }, config, () => false)
+  assert.equal(spec.command, 'node')
+  assert.equal(spec.transport, 'tcp')
+})
+
+test('built-in codelldb recipe passes only --port (no dap positional)', () => {
+  // Upstream's clap Cli defines long options only (--port/--connect/...):
+  // no subcommand and no positional argument exist, so an extra 'dap' made
+  // the binary exit with a usage error before listening. .rs programs guess
+  // into this recipe, so both explicit and guessed paths are pinned here.
+  const explicit = resolveAdapter({ adapter: 'codelldb', program: '/w/x' }, undefined, () => true)
+  assert.equal(explicit.command, 'codelldb')
+  assert.deepEqual(explicit.args, ['--port', '0'])
+  assert.equal(explicit.transport, 'tcp')
+  const guessed = resolveAdapter({ program: '/w/main.rs' }, undefined, () => true)
+  assert.deepEqual(guessed.args, ['--port', '0'])
+})
+
+test('config rows carry announceStream into the resolved spec', () => {
+  const config = {
+    'custom-ws': {
+      command: 'node',
+      args: ['/opt/adapter/server.js'],
+      transport: 'tcp',
+      announceStream: 'stderr',
+    },
+  }
+  const spec = resolveAdapter({ adapter: 'custom-ws', program: '/w/x' }, config, () => false)
+  assert.equal(spec.transport, 'tcp')
+  assert.equal(spec.announceStream, 'stderr')
+})

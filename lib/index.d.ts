@@ -47,6 +47,7 @@ export declare const Config: z<Schemastery.ObjectS<{
         connectHost?: string | null | undefined;
         connectPort?: number | null | undefined;
         portPattern?: string | null | undefined;
+        announceStream?: "stdout" | "stderr" | "both" | null | undefined;
         exceptionFilterMap?: import("@deepseek-ai/cosmokit").Dict<string, string> | null | undefined;
     } & import("@deepseek-ai/cosmokit").Dict, string>, import("@deepseek-ai/cosmokit").Dict<Schemastery.ObjectT<{
         command: z<string, string>;
@@ -62,6 +63,8 @@ export declare const Config: z<Schemastery.ObjectS<{
         connectPort: z<number, number>;
         /** Regex (string) matching the adapter's port announcement on stdout, one capture group for the port. Used when transport is 'tcp' without connectPort. */
         portPattern: z<string, string>;
+        /** Which child stream carries the port announcement: 'stdout', 'stderr', or 'both' (default 'both'). */
+        announceStream: z<"stdout" | "stderr" | "both", "stdout" | "stderr" | "both">;
         /** Standard DAP exception filter → adapter-specific filter name (e.g. debugpy: { all: 'raised' }). */
         exceptionFilterMap: z<import("@deepseek-ai/cosmokit").Dict<string, string>, import("@deepseek-ai/cosmokit").Dict<string, string>>;
     }>, string>>;
@@ -86,6 +89,7 @@ export declare const Config: z<Schemastery.ObjectS<{
         connectHost?: string | null | undefined;
         connectPort?: number | null | undefined;
         portPattern?: string | null | undefined;
+        announceStream?: "stdout" | "stderr" | "both" | null | undefined;
         exceptionFilterMap?: import("@deepseek-ai/cosmokit").Dict<string, string> | null | undefined;
     } & import("@deepseek-ai/cosmokit").Dict, string>, import("@deepseek-ai/cosmokit").Dict<Schemastery.ObjectT<{
         command: z<string, string>;
@@ -101,6 +105,8 @@ export declare const Config: z<Schemastery.ObjectS<{
         connectPort: z<number, number>;
         /** Regex (string) matching the adapter's port announcement on stdout, one capture group for the port. Used when transport is 'tcp' without connectPort. */
         portPattern: z<string, string>;
+        /** Which child stream carries the port announcement: 'stdout', 'stderr', or 'both' (default 'both'). */
+        announceStream: z<"stdout" | "stderr" | "both", "stdout" | "stderr" | "both">;
         /** Standard DAP exception filter → adapter-specific filter name (e.g. debugpy: { all: 'raised' }). */
         exceptionFilterMap: z<import("@deepseek-ai/cosmokit").Dict<string, string>, import("@deepseek-ai/cosmokit").Dict<string, string>>;
     }>, string>>;

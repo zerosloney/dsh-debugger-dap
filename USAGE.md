@@ -369,6 +369,48 @@
 
 ---
 
+## 27. `step_back` — 反向步进
+
+| 参数 | 说明 |
+|---|---|
+| （无） | 与其它恢复类动作一致：等待下一次停机，超时返回 running |
+
+```json
+{ "action": "step_back" }
+```
+需适配器声明 `supportsStepBack`（如基于 rr 回放的后端）；不支持时返回 not_supported。
+
+---
+
+## 28. `select_thread` — 切换焦点线程
+
+| 参数 | 说明 |
+|---|---|
+| `thread_id` | 必填；来自 `threads` 返回值 |
+
+```json
+{ "action": "select_thread", "thread_id": 2 }
+```
+多线程停机时切换后续 step / stack_trace / exception_info 使用的焦点线程；快照携带 `allThreadsStopped` 标识。传入不存在的 thread_id 报 no_thread 并列出可用 id。
+
+---
+
+## 29. `add_watch` / `remove_watch` / `list_watches` — 观察表达式
+
+| 参数 | 说明 |
+|---|---|
+| `expression` | `add_watch` 必填 |
+| `watch_id` | `remove_watch` 必填；来自 `add_watch` 返回值 |
+
+```json
+{ "action": "add_watch", "expression": "count * 2" }
+{ "action": "list_watches" }
+{ "action": "remove_watch", "watch_id": "w1" }
+```
+登记后立即求值一次并返回 watch_id；此后每次停机自动重估全部观察表达式，结果随会话快照的 `watches` 字段返回（单个求值失败记为该条的 error，不影响调试流程）。
+
+---
+
 ## 端到端示例
 
 ### .NET（netcoredbg）
@@ -416,8 +458,10 @@
     maxVariables: 100
     maxResultChars: 16000
     adapters:
-      js-debug:
+      js-debug:  # js-debug 随 VS Code 发行（extensions/ms-vscode.js-debug/dist/src/dapDebugServer.js），不发布到 npm
         command: node
         args: ['/opt/js-debug/src/dapDebugServer.js']
+        transport: tcp        # 缺省 stdio；js-debug 是 TCP server
         launchArgs: { sourceMaps: true }
+        # announceStream: stderr  # 端口播报流：stdout/stderr/both（默认 both）
 ```

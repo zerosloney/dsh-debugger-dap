@@ -26,17 +26,18 @@ test('snapshot-first rendering anchors every result', () => {
 })
 
 test('resume timeout explains the pause escape hatch', () => {
-  const text = renderDebugText(
-    {
-      action: 'continue',
-      snapshot: { ...baseSnapshot, status: 'running', stopReason: undefined, frame: undefined },
-      state: 'running',
-      timed_out: true,
-    },
-    16000,
-  )
+  const value = {
+    action: 'continue',
+    snapshot: { ...baseSnapshot, status: 'running', stopReason: undefined, frame: undefined },
+    state: 'running',
+    timed_out: true,
+  }
+  const text = renderDebugText(value, 16000)
   assert.ok(text.includes('still running'))
   assert.ok(text.includes('pause'))
+  // The hint reports the CONFIGURED step deadline, not a hardcoded constant.
+  const customText = renderDebugText(value, 16000, 30_000)
+  assert.ok(customText.includes('after 30000ms'), `hint must carry the configured deadline, got: ${customText.split('\n').at(-1)}`)
 })
 
 test('stack frames render as jumpable references', () => {
@@ -130,4 +131,34 @@ test('set_data_breakpoints and goto_targets render resolved rows', () => {
   )
   assert.ok(targetsText.includes('Goto targets (1):'))
   assert.ok(targetsText.includes('- #12 line 88 @ line 88'))
+})
+
+test('watch, thread-focus, and reverse-step actions render their outcome', () => {
+  // Regression: these five actions used to fall through to the default
+  // branch and render "Unknown debug action", hiding state from the model.
+  const stepBack = renderDebugText(
+    { action: 'step_back', snapshot: baseSnapshot, state: 'stopped', timed_out: false },
+    16000,
+  )
+  assert.ok(stepBack.includes('Session dbg-1'), 'step_back anchors the snapshot')
+  assert.ok(stepBack.includes('Stopped at'), 'step_back reports the new stop location')
+
+  const selectThread = renderDebugText({ action: 'select_thread', snapshot: { ...baseSnapshot, threadId: 2 } }, 16000)
+  assert.ok(selectThread.includes('Focus thread switched to 2.'))
+
+  const addWatch = renderDebugText({ action: 'add_watch', snapshot: baseSnapshot, watch_id: 'w1' }, 16000)
+  assert.ok(addWatch.includes('Watch w1 added.'))
+  const removeWatch = renderDebugText({ action: 'remove_watch', snapshot: baseSnapshot, watch_id: 'w1' }, 16000)
+  assert.ok(removeWatch.includes('Watch w1 removed.'))
+
+  const listEmpty = renderDebugText(
+    { action: 'list_watches', snapshot: { ...baseSnapshot, watches: undefined } },
+    16000,
+  )
+  assert.ok(listEmpty.includes('No watch expressions.'))
+  const listFilled = renderDebugText(
+    { action: 'list_watches', snapshot: { ...baseSnapshot, watches: [{ id: 'w1', expression: 'x', value: '1' }] } },
+    16000,
+  )
+  assert.ok(listFilled.includes('1 watch expression(s) shown above.'))
 })

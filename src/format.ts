@@ -238,8 +238,8 @@ function unreachableSnapshot(): DebugSnapshot {
   return { id: '?', adapter: '?', program: '', status: 'terminated', configuring: false, outputChars: 0 }
 }
 
-/** Render the canonical value into one bounded text block. */
-export function renderDebugText(value: DebugToolValue, maxResultChars: number): string {
+/** Render the canonical value into one bounded text block. `stepTimeoutMs` is the configured resume deadline, shown in the timeout hint. */
+export function renderDebugText(value: DebugToolValue, maxResultChars: number, stepTimeoutMs = 10_000): string {
   let sections: string[]
   switch (value.action) {
     case 'launch':
@@ -264,9 +264,32 @@ export function renderDebugText(value: DebugToolValue, maxResultChars: number): 
     case 'step_in':
     case 'step_over':
     case 'step_out':
+    case 'step_back':
     case 'pause':
-      sections = formatOutcome(value, 10_000)
+      sections = formatOutcome(value, stepTimeoutMs)
       break
+    case 'select_thread': {
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      const threadId = value.snapshot?.threadId
+      sections.push(threadId !== undefined ? `Focus thread switched to ${threadId}.` : 'Focus thread switched.')
+      break
+    }
+    case 'add_watch': {
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      sections.push(`Watch ${value.watch_id ?? '?'} added.`)
+      break
+    }
+    case 'remove_watch': {
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      sections.push(`Watch ${value.watch_id ?? '?'} removed.`)
+      break
+    }
+    case 'list_watches': {
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      const watches = value.snapshot?.watches ?? []
+      sections.push(watches.length > 0 ? `${watches.length} watch expression(s) shown above.` : 'No watch expressions.')
+      break
+    }
     case 'stack_trace':
       sections = formatFrames(value.frames ?? [], value.frames_omitted ?? 0)
       break

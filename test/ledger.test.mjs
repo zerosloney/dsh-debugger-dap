@@ -46,7 +46,8 @@ test('ledger: record 追加内存与 JSONL，条目带 seq/ts/sessionId/kind/det
 })
 
 test('ledger: query 支持 sessionId/kind/since/limit 过滤', () => {
-  const ledger = DebugLedger.create({ path: join(tmpdir(), `dsh-dap-q-${Date.now()}-${Math.random()}.jsonl`) })
+  const path = join(tmpdir(), `dsh-dap-q-${Date.now()}-${Math.random()}.jsonl`)
+  const ledger = DebugLedger.create({ path })
   try {
     for (let i = 1; i <= 10; i += 1) {
       ledger.record(i % 2 === 0 ? 'dbg-a' : 'dbg-b', i % 3 === 0 ? 'exception' : 'stop', { n: i })
@@ -66,7 +67,7 @@ test('ledger: query 支持 sessionId/kind/since/limit 过滤', () => {
     assert.equal(small.truncated, true)
     assert.equal(small.entries.length, 4)
   } finally {
-    ledger.record // noop
+    rmSync(path, { force: true })
   }
 })
 

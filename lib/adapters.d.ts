@@ -1,7 +1,8 @@
 /**
  * Adapter recipes: built-in DAP adapters (debugpy, dlv, netcoredbg,
- * lldb-dap, js-debug, codelldb) plus config-declared rows, resolved
- * against PATH with actionable install hints.
+ * lldb-dap, codelldb) plus config-declared rows, resolved against PATH
+ * with actionable install hints. js-debug is intentionally config-only:
+ * it ships as a TCP DAP server script rather than a PATH command.
  */
 /** One launchable adapter command line. */
 export interface AdapterSpec {
@@ -30,6 +31,8 @@ export interface AdapterSpec {
     port?: number;
     /** Regex (string or RegExp) matching the adapter's port announcement on stdout, one capture group for the port. Used when the TCP port is discovered. */
     portPattern?: string | RegExp;
+    /** Which child stream carries the port announcement: `'stdout'`, `'stderr'`, or `'both'` (default `'both'`). */
+    announceStream?: 'stdout' | 'stderr' | 'both';
 }
 /** One `adapters` config row. */
 export interface AdapterConfigEntry {
@@ -47,6 +50,8 @@ export interface AdapterConfigEntry {
     connectPort?: number;
     /** Regex (string) matching the adapter's port announcement on stdout, one capture group for the port. Used when transport is 'tcp' without connectPort. */
     portPattern?: string;
+    /** Which child stream carries the port announcement: 'stdout', 'stderr', or 'both' (default 'both'). */
+    announceStream?: 'stdout' | 'stderr' | 'both';
     /** Standard DAP exception filter → adapter-specific filter name (e.g. debugpy: { all: 'raised' }). */
     exceptionFilterMap?: Record<string, string>;
 }

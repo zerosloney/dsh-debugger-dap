@@ -1,3 +1,5 @@
 node_modules/
 tests/
 .cbx/
+# runtime artifact of scripts/e2e-real.mjs
+.e2e-ledger.jsonl

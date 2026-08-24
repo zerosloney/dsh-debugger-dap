@@ -71,6 +71,8 @@ export const Config = z.object({
         connectPort: z.number().min(1),
         /** Regex (string) matching the adapter's port announcement on stdout, one capture group for the port. Used when transport is 'tcp' without connectPort. */
         portPattern: z.string(),
+        /** Which child stream carries the port announcement: 'stdout', 'stderr', or 'both' (default 'both'). */
+        announceStream: z.union([z.const('stdout'), z.const('stderr'), z.const('both')]).default('both'),
         /** Standard DAP exception filter → adapter-specific filter name (e.g. debugpy: { all: 'raised' }). */
         exceptionFilterMap: z.dict(z.string()),
       }),

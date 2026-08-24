@@ -518,7 +518,7 @@ export async function runDebugAction(
       const session = manager.sessionFor(owner, args.session_id)
       const removed = session.removeWatch(args.watch_id)
       if (!removed) throw new DebugError('no_session', `No watch '${args.watch_id}'.`)
-      return { action: 'remove_watch', session_id: session.id, snapshot: session.snapshot() }
+      return { action: 'remove_watch', session_id: session.id, snapshot: session.snapshot(), watch_id: args.watch_id }
     }
     case 'list_watches': {
       const session = manager.sessionFor(owner, args.session_id)
@@ -639,7 +639,9 @@ export function createDebugTool(
     parameters: debugParameters,
     output: {
       schema: debugOutputSchema,
-      render: (_args, value) => [{ type: 'text', text: renderDebugText(value as DebugToolValue, limits.maxResultChars) }],
+      render: (_args, value) => [
+        { type: 'text', text: renderDebugText(value as DebugToolValue, limits.maxResultChars, limits.stepTimeoutMs) },
+      ],
     },
     isConcurrencySafe: args => {
       const action = (args as DebugArgs).action

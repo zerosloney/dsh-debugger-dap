@@ -19,12 +19,14 @@ DAP 交互式调试器，作为 [DeepSeek Harness](https://www.npmjs.com/package
 | `set_function_breakpoints` | 按函数名下断点（`functions` + `condition`/`hit_condition`） | 执行 |
 | `set_exception_breakpoints` | 配置哪些异常中断（`filters` 如 `['all']`，或 `filter_options`） | 执行 |
 | `continue` / `step_in` / `step_over` / `step_out` / `pause` | 恢复执行；等待下一次停机，结果附带自上次读取以来的增量输出 | 执行 |
+| `step_back` | 反向步进（需适配器声明 supportsStepBack）；等待下一次停机 | 执行 |
 | `evaluate` | 在当前帧上下文求值 | 执行 |
 | `set_variable` / `set_expression` | 在 `variables_ref`/当前帧写入新值 | 执行 |
 | `disconnect` | 结束会话（默认终止被调试进程） | 执行 |
 | `ledger` | 查询调试会话台账（启动/断点/异常/终止等关键事件；支持 `session_id`/`ledger_kinds`/`ledger_since`/`ledger_limit` 过滤） | 只读 |
 | `threads` / `stack_trace` / `scopes` / `variables` / `exception_info` / `output` / `sessions` | 检视与读取 | 只读 |
 | `select_thread` | 切换焦点线程（后续 step/stack_trace 使用该线程） | 执行 |
+| `add_watch` / `remove_watch` / `list_watches` | 观察表达式：登记后每次停机自动求值并随快照返回；按 watch_id 移除/列出 | 执行 |
 | `restart` | 按原始 launch 配置重启 debuggee | 执行 |
 | `source` | 读取当前停止位置的源码内容（支持 `source_reference` 取内存源） | 只读 |
 | `loaded_sources` | 列出 debuggee 已加载的所有源文件 | 只读 |
@@ -125,7 +127,7 @@ dsh plugin add --profile debugger dsh-debugger-dap@latest
 debug launch adapter=netcoredbg program=<构建出的>.dll cwd=<项目目录>
 ```
 
-覆盖内置配方或声明其他 stdio 适配器（`launchArgs` 会并入 DAP `launch` 请求体，用于适配器特有的启动参数，如 `sourceMaps`、`justMyCode`；覆盖内置配方时缺省的 `launchArgs`/入口停止字段会继承自带默认）。TCP 适配器若不带 `connectPort`，端口从 stdout 播报中发现——默认匹配 `Listening on port <N>`，可用 `portPattern` 声明自定义格式（正则字符串，一个捕获组为端口）：
+覆盖内置配方或声明其他 stdio 适配器（`launchArgs` 会并入 DAP `launch` 请求体，用于适配器特有的启动参数，如 `sourceMaps`、`justMyCode`；覆盖内置配方时缺省的 `launchArgs`/入口停止字段会继承自带默认）。TCP 适配器若不带 `connectPort`，端口从子进程 stdout/stderr 播报中发现——默认同时扫描两条流并匹配 `Listening on port <N>`，可用 `portPattern` 声明自定义格式（正则字符串，一个捕获组为端口），用 `announceStream` 固定到 `stdout`/`stderr`（适配 `node --inspect` 这类把播报写到 stderr 的调试器）：
 
 ```yaml
 - id: debugger-dap
@@ -153,6 +155,7 @@ npm run lint   # oxlint：src/test/helpers
 ## 已知限制
 
 - **传输层**：stdio（默认）与 TCP 均支持；内置 `codelldb` 配方声明 TCP，spawn 后从 stdout 的 "Listening on port &lt;N&gt;" 自动发现监听端口并连接，其余内置配方走 stdio。js-debug 官方发行以 TCP server 为主，可经 `adapters` 配置声明其命令与 `transport: 'tcp'`/`connectPort`——配置的命令会被实际 spawn，连接会重试直到子进程在 `connectPort` 上开始监听（显式端口优先于 stdout 发现）。
+- **js-debug 无内置配方**：它随 VS Code 发行（`extensions/ms-vscode.js-debug/dist/src/dapDebugServer.js`），**从不发布到 npm**，无法作为 PATH 命令自动解析。未配置时对 `.js/.ts` 程序的 launch 会立即失败并给出可操作的 `adapters` 配置指引（不再空转到请求超时）；配置后即可用。
 - **attach 按 pid、依赖适配器支持**：已支持 `process_id` 附加（debugpy/netcoredbg 等）；port/pipe 附加与 Windows 下部分适配器的 attach 受其本身能力限制。暂无指令断点、汇编、内存读写。
 - **权限策略不在工具内**：按 dsh 惯例，审批/沙箱策略应通过宿主 `tools/pre-execute` 扩展点组合，而非内建于工具；launch 会以普通子进程 spawn（未走 `ctx.subprocess` 执行世界）。
 - **会话不跨进程持久**：会话注册表在插件卸载时全部拆除；agent 释放后其遗留会话在插件卸载前保持存活（v1 无逐 agent 生命周期钩子）。

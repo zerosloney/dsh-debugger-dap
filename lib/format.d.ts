@@ -122,5 +122,5 @@ export declare function formatVariables(variables: VariableView[], omitted: numb
 export declare function formatOutcome(value: DebugToolValue, timeoutMs: number): string[];
 export declare function formatSessions(sessions: DebugSnapshot[]): string[];
 export declare function formatOutput(page: OutputPage): string[];
-/** Render the canonical value into one bounded text block. */
-export declare function renderDebugText(value: DebugToolValue, maxResultChars: number): string;
+/** Render the canonical value into one bounded text block. `stepTimeoutMs` is the configured resume deadline, shown in the timeout hint. */
+export declare function renderDebugText(value: DebugToolValue, maxResultChars: number, stepTimeoutMs?: number): string;
