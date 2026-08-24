@@ -544,14 +544,8 @@ export class DebugSession {
     const threadId = await this.resolveThreadId(signal)
     const previousStatus = this.status
     this.status = 'running'
-    const stopPromise = this.waitForStop(this.limits.stepTimeoutMs, signal)
-    try {
-      await this.connection.send('stepBack', { threadId }, { signal })
-    } catch (error) {
-      this.clearStopWaiter()
-      this.status = previousStatus
-      throw error
-    }
+    const stopPromise = this.registerStopWaiter(this.limits.stepTimeoutMs, signal)
+    await this.connection.send('stepBack', { threadId }, { signal })
     const state = await stopPromise
     const finalStatus = this.readStatus()
     const timedOut = state === 'stopped' ? false : finalStatus !== 'terminated'
