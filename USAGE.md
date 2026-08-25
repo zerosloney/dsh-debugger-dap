@@ -29,16 +29,22 @@
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
-| `program` | ✅ | 被调试程序：Python 脚本 / Go 源码或二进制 / .NET dll（推荐 `.dll` 便于自动选适配器） |
-| `adapter` | | 缺省按 `program` 扩展名自动选择 |
+| `program` | 条件选填 | 被调试程序：Python 脚本 / Go 源码或二进制 / .NET dll。若存在 `.vscode/launch.json` 可省略 |
+| `launch_config` | | 指定 `.vscode/launch.json` 中的配置名称（如 `"Python: Current File"`、`"Debug App"`） |
+| `adapter` | | 缺省按 `program` 扩展名或 `launch.json` 中的 `type` 自动选择 |
 | `args` | | 传给程序的命令行参数（string[]） |
-| `cwd` | | 工作目录 |
+| `cwd` | | 工作目录（默认为进程 cwd） |
 | `stop_on_entry` | | 是否停在入口（默认 `true`；netcoredbg 自动映射为 `stopAtEntry`） |
 
+> **🔥 VS Code 联动与零配置启动**：
+> 1. **零参数启动**：直接下发 `{ "action": "launch" }` 时，若未传 `program`，插件会自动读取当前工作区根目录下的 `.vscode/launch.json`，自动解析 `${workspaceFolder}`、`${env:VAR}` 等宏变量并按首项配置发起调试。
+> 2. **按名启动**：`{ "action": "launch", "launch_config": "Node: Server" }` 自动匹配对应配置并提取参数与环境变量。
+> 3. **构建任务联动 (`preLaunchTask`)**：若 `launch.json` 中配置了 `"preLaunchTask": "build"`，插件会在连接 DAP 调试前自动解析 `.vscode/tasks.json` 并执行编译/构建任务；若构建失败会立即返回详细的编译器 stderr 报错。
+
 ```json
-{ "action": "launch", "program": "E:/Demo/dotnet/.../App.dll", "cwd": "E:/Demo/dotnet/...", "stop_on_entry": true }
+{ "action": "launch", "launch_config": "Python: Main App" }
 ```
-返回携带快照，`Status: stopped` 表示已停在入口。
+返回携带快照，`Status: stopped` 表示已停在入口。若触发异常停机，快照顶栏会直接显示 `💥 Exception: ...` 诊断横幅；若有多线程还会自动附带 `Threads (N):` 列表与聚焦高亮。
 
 ---
 
@@ -289,12 +295,17 @@
 
 | 参数 | 说明 |
 |---|---|
-| `data_breakpoints` | 结构化数组：`{ data_id?, address?, name?, access_type?, condition?, hit_condition? }[]` |
-| `data_id` | 从 `data_breakpoint_info` 获取的数据标识符 |
-| `address` / `watch_name` / `access_type` | 单条速记形式 |
+| `data_breakpoints` | 结构化数组：`{ data_id?, address?, name?, variables_reference?, frame_id?, access_type?, condition?, hit_condition? }[]` |
+| `name` / `watch_name` | **一步直达**：直接传入变量名，插件内部自动查询 `dataId` 并下发断点 |
+| `data_id` | 从 `data_breakpoint_info` 获取的数据标识符（可选） |
+| `address` / `access_type` | 内存地址与访问类型（`read` / `write` / `readWrite`） |
 | `condition` / `hit_condition` | 条件断点与命中次数条件 |
 
 ```json
+// 方式一：一步直达（自动查询 dataId）
+{ "action": "set_data_breakpoints", "name": "counter", "access_type": "write" }
+
+// 方式二：显式 data_id
 { "action": "set_data_breakpoints", "data_id": "var_ptr_1", "access_type": "write" }
 ```
 需适配器支持数据断点（`supportsDataBreakpoints`）。
@@ -318,7 +329,7 @@
 
 ---
 
-## 21. `read_memory` — 读取原始内存数据
+## 21. `read_memory` — 读取原始内存数据（标准 Hexdump 渲染）
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -327,9 +338,14 @@
 | `offset` | | 字节偏移（默认 0） |
 
 ```json
-{ "action": "read_memory", "memory_reference": "0x1000", "count": 32 }
+{ "action": "read_memory", "memory_reference": "0x7fffffffe000", "count": 32 }
 ```
-需适配器支持 `supportsReadMemoryRequest`，返回 base64 编码的内存数据与未读字节数。
+自动将内存字节流排版为标准 `hexdump -C` 格式（起始地址 + 16字节Hex + ASCII 对照），便于模型直观分析内存结构：
+```text
+Memory at 0x7fffffffe000 (32 bytes):
+  0x00007fffffffe000  48 65 6c 6c 6f 20 57 6f  72 6c 64 21 00 00 00 00  |Hello World!....|
+  0x00007fffffffe010  ef be ad de 00 00 00 00  01 00 00 00 00 00 00 00  |................|
+```
 
 ---
 
@@ -543,7 +559,8 @@
 
 ## 配置速查（profile 的 cordis.patch.yml）
 
-内置配方默认即可用。自定义/覆盖适配器：
+内置配方默认即可用（支持自动扫描 VS Code 安装的 `ms-vscode.js-debug` 和 `vadimcn.vscode-lldb` 适配器）。
+自定义/覆盖适配器时，支持使用 `~`、`%USERPROFILE%`、`$HOME` 跨平台路径宏：
 
 ```yaml
 - id: debugger-dap
@@ -555,10 +572,15 @@
     maxVariables: 100
     maxResultChars: 16000
     adapters:
-      js-debug:  # js-debug 随 VS Code 发行（extensions/ms-vscode.js-debug/dist/src/dapDebugServer.js），不发布到 npm
+      # 支持使用 '~'、'%USERPROFILE%'、'$HOME' 跨平台解析不同用户的家目录与动态版本
+      js-debug:
         command: node
-        args: ['/opt/js-debug/src/dapDebugServer.js']
+        args: ['~/.vscode/extensions/ms-vscode.js-debug/dist/src/dapDebugServer.js']
         transport: tcp        # 缺省 stdio；js-debug 是 TCP server
         launchArgs: { sourceMaps: true }
         # announceStream: stderr  # 端口播报流：stdout/stderr/both（默认 both）
+      codelldb:
+        command: '~/.vscode/extensions/vadimcn.vscode-lldb/adapter/codelldb'
+        args: ['--port', '0']
+        transport: tcp
 ```

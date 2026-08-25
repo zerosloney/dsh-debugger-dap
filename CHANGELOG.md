@@ -4,19 +4,34 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-08-25
+
+### Added
+
+- **Task & Build Integration (Direction B)**:
+  - **`preLaunchTask` 与 `.vscode/tasks.json` 构建任务集成**：新增 `readTasksConfigurations`、`resolveTaskCommand` 与 `runPreLaunchTask`。当 `launch.json` 中配置了 `preLaunchTask`（如编译/构建脚本）时，`launch` 动作会在发起 DAP 连接前自动执行前置构建任务；若构建失败则立即返回编译器输出及退出码，实现一键编译并调试。
+- **Exception & Multi-Thread Diagnostics (Direction A)**:
+  - **异常诊断高亮 (Exception Diagnostics Highlight)**：当程序触发未捕获异常停机（`stopReason === 'exception'`）时，会话快照与渲染层自动提取异常类型、描述、消息及顶层调用栈信息，在快照中以醒目的 `💥 Exception:` 横幅直接呈现，并附带针对性诊断提示，省去额外的网络查询轮次。
+  - **多线程停机全局概览 (Multi-thread Stop Overview)**：当多线程程序发生停机（`allThreadsStopped` 或检测到多个活跃线程）时，快照自动呈现线程列表与停机状态概览（`Threads (N):`），并以 `*` 明确高亮当前聚焦线程。
+- **VS Code Ecosystem & Zero-config Launching**:
+  - **工作区 `.vscode/launch.json` 自动解析与联动**：新增 `resolveLaunchConfig`、`readLaunchConfigurations` 与 JSONC 注释解析器。在 `launch` 动作中支持 `launch_config` 按名启动，或在省略 `program` 时自动读取工作区首项配置，自动展开 `${workspaceFolder}`、`${env:VAR}` 等变量并透传扩展参数。
+  - **VS Code 扩展自动扫描与发现 (`findVsCodeExtensionEntry`)**：自动跨平台（Windows / macOS / Linux）检索 `~/.vscode/extensions`、`.vscode-insiders` 及 VS Code 安装目录，模糊匹配最新版本扩展（如 `ms-vscode.js-debug`、`vadimcn.vscode-lldb`），实现零配置复用 VS Code 调试器。
+  - **跨平台路径宏展开 (`expandPath`)**：在适配器配置（`command`、`args`、`cwd`）中自动将 `~` 展开为用户家目录（`os.homedir()`），并解析 `%VAR%` / `${VAR}` 环境变量，解决不同机器用户名与路径硬编码问题。
+
 ## [0.1.7] - 2026-08-25
 
 ### Added
 
 - **New DAP Actions (41 Actions Total)**:
   - `data_breakpoint_info`: Query data breakpoint capabilities and get `dataId` for setting watchpoints on variables/fields.
-  - `set_data_breakpoints`: Enhanced to accept `data_id`, `condition`, and `hit_condition` in addition to `address`/`name`/`access_type`.
+  - `set_data_breakpoints`: Enhanced to accept `data_id`, `condition`, and `hit_condition`. Supports **一步直达 (One-shot setup)** by automatically querying `data_breakpoint_info` behind the scenes when variable `name` is passed without `data_id`.
   - `disassemble`: Disassemble memory from a `memory_reference` with instruction bytes, symbol resolution, and source location mapping.
-  - `read_memory`: Read raw memory bytes as base64 from a `memory_reference` with offset and count.
+  - `read_memory`: Read raw memory bytes as base64 with offset and count, rendered automatically in standard **`hexdump -C` format** (address + hex bytes + ASCII column) for direct model analysis.
   - `completions`: REPL auto-completion support for expressions and symbols at a specific frame/cursor line and column.
   - `reverse_continue`: Reverse execution continuing backward until a breakpoint or start of program.
   - `terminate`: Graceful DAP termination request (recording `terminate` reason in ledger).
 - **Inspection Enhancements**:
+  - `formatHexDump`: Standard 16-byte aligned Hexdump formatter with 32-bit/64-bit address padding and printable ASCII preview.
   - `variables` and `evaluate` actions now support `hex: true` formatting for hex number representations.
   - `variables` action supports `filter: 'indexed' | 'named'` for filtering arrays vs object fields.
   - `goto_targets` now supports in-memory sources (`sourceReference`) in addition to file paths.

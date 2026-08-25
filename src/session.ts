@@ -78,6 +78,17 @@ export interface DebugSnapshot {
   outputChars: number
   /** Latest watch expression results (id → value/error). */
   watches?: Array<{ id: string; expression: string; value?: string; error?: string }>
+  /** Exception details if stopped due to an exception. */
+  exceptionDetails?: {
+    exceptionId: string
+    description?: string
+    breakMode?: string
+    message?: string
+    typeName?: string
+    stack?: string
+  }
+  /** Multi-thread summary overview when more than 1 thread is active. */
+  threadsSummary?: Array<{ id: number; name: string; stopped?: boolean; reason?: string }>
   /** Adapter capabilities relevant to model decisions, from the initialize handshake. */
   capabilities?: {
     set_variable?: boolean
@@ -163,6 +174,17 @@ export class DebugSession {
   capabilities: DapCapabilities = {}
   /** Whether the last stop halted every thread (allThreadsStopped). */
   allThreadsStopped: boolean | undefined
+  exceptionDetails:
+    | {
+        exceptionId: string
+        description?: string
+        breakMode?: string
+        message?: string
+        typeName?: string
+        stack?: string
+      }
+    | undefined
+  threadsSummary: Array<{ id: number; name: string; stopped?: boolean; reason?: string }> | undefined
   private stopReasonDescription: string | undefined
   private configurationDoneSent = false
   private readonly outputLines: string[] = []
@@ -174,6 +196,7 @@ export class DebugSession {
   private disposed = false
   private cwdValue: string | undefined
   private initializedSeen = false
+  private multipleThreadsSeen = false
   private lastActivityAt = Date.now()
   /** Session creation time; also the ledger's duration baseline. */
   private readonly startedAt = Date.now()
@@ -300,8 +323,7 @@ export class DebugSession {
         void this.recordStopLedger(stopped)
       }),
       connection.onEvent('thread', () => {
-        // Thread started/exited notifications: the threads list is re-queried
-        // on demand via the threads action, so no cache is maintained here.
+        this.multipleThreadsSeen = true
       }),
       connection.onEvent('terminated', () => {
         this.status = 'terminated'
@@ -880,22 +902,56 @@ export class DebugSession {
   }
 
   async setDataBreakpoints(
-    breakpoints: readonly { dataId?: string; address?: string; name?: string; accessType?: 'read' | 'write' | 'readWrite'; condition?: string; hitCondition?: string }[],
+    breakpoints: readonly {
+      dataId?: string
+      address?: string
+      name?: string
+      variablesReference?: number
+      frameId?: number
+      accessType?: 'read' | 'write' | 'readWrite'
+      condition?: string
+      hitCondition?: string
+    }[],
     signal?: AbortSignal,
   ): Promise<DapDataBreakpoint[]> {
     if (this.capabilities.supportsDataBreakpoints !== true) {
       throw new DebugError('not_supported', "The adapter does not support 'setDataBreakpoints'.")
     }
+    const resolvedBreakpoints: Array<{
+      dataId: string
+      accessType?: 'read' | 'write' | 'readWrite'
+      condition?: string
+      hitCondition?: string
+    }> = []
+
+    for (const bp of breakpoints) {
+      let dataId = bp.dataId
+      if (!dataId && (bp.name !== undefined || bp.address !== undefined)) {
+        try {
+          const info = await this.dataBreakpointInfo(
+            bp.name ?? bp.address!,
+            bp.variablesReference,
+            bp.frameId,
+            signal,
+          )
+          if (info.dataId) {
+            dataId = info.dataId
+          }
+        } catch {
+          // Fallback to using name or address directly
+        }
+      }
+      resolvedBreakpoints.push({
+        dataId: dataId ?? bp.name ?? bp.address ?? '',
+        ...(bp.accessType !== undefined ? { accessType: bp.accessType } : {}),
+        ...(bp.condition !== undefined ? { condition: bp.condition } : {}),
+        ...(bp.hitCondition !== undefined ? { hitCondition: bp.hitCondition } : {}),
+      })
+    }
+
     const body = await this.connection.send(
       'setDataBreakpoints',
-      {
-        breakpoints: breakpoints.map(bp => ({
-          dataId: bp.dataId ?? bp.name ?? bp.address ?? '',
-          ...(bp.accessType !== undefined ? { accessType: bp.accessType } : {}),
-          ...(bp.condition !== undefined ? { condition: bp.condition } : {}),
-          ...(bp.hitCondition !== undefined ? { hitCondition: bp.hitCondition } : {}),
-        })),
-      },
+      { breakpoints: resolvedBreakpoints },
       { signal },
     )
     return readDataBreakpoints(body)
@@ -1111,6 +1167,8 @@ export class DebugSession {
       configuring: this.status === 'configuring',
       outputChars: this.outputChars,
       watches: this.listWatches().length > 0 ? this.listWatches() : undefined,
+      exceptionDetails: this.exceptionDetails,
+      threadsSummary: this.threadsSummary,
       capabilities: {
         set_variable: this.capabilities.supportsSetVariable,
         set_expression: this.capabilities.supportsSetExpression,
@@ -1221,6 +1279,55 @@ export class DebugSession {
       this.currentFrame = readStackFrames(body)[0]
     } catch {
       // location is best-effort decoration; the stop itself already folded
+    }
+
+    if (this.stopReason === 'exception' && this.capabilities.supportsExceptionInfoRequest) {
+      try {
+        const threadId = this.activeThreadId ?? (await this.resolveThreadId(signal))
+        const body = await this.connection.send(
+          'exceptionInfo',
+          { threadId },
+          { signal, timeoutMs: Math.min(this.limits.requestTimeoutMs, 3000) },
+        )
+        const info = readExceptionInfo(body)
+        this.exceptionDetails = {
+          exceptionId: info.exceptionId,
+          description: info.description,
+          breakMode: info.breakMode,
+          message: info.message,
+          typeName: info.typeName,
+          stack: info.stack,
+        }
+      } catch {
+        // best-effort
+      }
+    } else {
+      this.exceptionDetails = undefined
+    }
+
+    if (this.allThreadsStopped === true || this.multipleThreadsSeen) {
+      try {
+        const body = await this.connection.send('threads', undefined, {
+          signal,
+          timeoutMs: Math.min(this.limits.requestTimeoutMs, 3000),
+        })
+        const threads = readThreads(body)
+        if (threads.length > 1) {
+          this.multipleThreadsSeen = true
+          this.threadsSummary = threads.map(t => ({
+            id: t.id,
+            name: t.name,
+            stopped: this.allThreadsStopped || t.id === this.activeThreadId,
+            reason: t.id === this.activeThreadId ? this.stopReason : undefined,
+          }))
+        } else {
+          this.threadsSummary = undefined
+        }
+      } catch {
+        // best-effort
+      }
+    } else {
+      this.threadsSummary = undefined
     }
   }
 
@@ -1346,7 +1453,9 @@ export interface ManagerLaunchRequest {
   program: string
   args?: readonly string[]
   cwd?: string
+  env?: Record<string, string>
   stopOnEntry?: boolean
+  extraLaunchArgs?: Record<string, unknown>
 }
 
 /** One attach request as handed to the manager. */
@@ -1412,7 +1521,11 @@ export class DebugSessionManager {
         args: request.args,
         cwd: request.cwd,
         stopOnEntry: request.stopOnEntry ?? true,
-        launchArgs: spec.launchArgs,
+        launchArgs: {
+          ...spec.launchArgs,
+          ...(request.env !== undefined ? { env: request.env } : {}),
+          ...request.extraLaunchArgs,
+        },
         stopOnEntryKey: spec.stopOnEntryKey,
         signal,
       })

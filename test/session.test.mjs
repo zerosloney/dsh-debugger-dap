@@ -578,6 +578,14 @@ test('dataBreakpointInfo and setDataBreakpoints work with adapter capabilities',
   const lastSet = fake.server.received.find(m => m.command === 'setDataBreakpoints')
   assert.equal(lastSet.arguments.breakpoints[0].dataId, 'id_myVar')
   assert.equal(lastSet.arguments.breakpoints[0].accessType, 'write')
+
+  // Auto-query dataId via name when dataId is omitted
+  const autoBps = await session.setDataBreakpoints([{ name: 'autoVar', accessType: 'readWrite' }])
+  assert.equal(autoBps.length, 1)
+  const autoSet = fake.server.received.filter(m => m.command === 'setDataBreakpoints').pop()
+  assert.equal(autoSet.arguments.breakpoints[0].dataId, 'id_autoVar')
+  assert.equal(autoSet.arguments.breakpoints[0].accessType, 'readWrite')
+
   await manager.disposeAll()
 })
 

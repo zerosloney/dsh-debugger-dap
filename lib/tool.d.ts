@@ -36,6 +36,7 @@ export interface DebugArgs {
     session_id?: string;
     adapter?: string;
     program?: string;
+    launch_config?: string;
     args?: string[];
     cwd?: string;
     stop_on_entry?: boolean;

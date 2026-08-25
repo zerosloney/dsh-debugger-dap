@@ -3,6 +3,9 @@ import { test } from 'node:test'
 import { runDebugAction, DEBUG_ACTIONS, CONCURRENT_SAFE_ACTIONS, omitUndefined } from '../lib/tool.js'
 import { DebugError, DebugSessionManager } from '../lib/session.js'
 import { createFakeAdapter, standardScript, testLimits } from '../helpers/fake-adapter.mjs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 function buildManager(script) {
   const fake = createFakeAdapter(script)
@@ -65,10 +68,71 @@ test('the full debugging workflow drives through the tool layer', async () => {
   assert.equal(disconnected.snapshot.status, 'terminated')
 })
 
-test('launch without program is an argument error', async () => {
+test('launch without program is an argument error when no launch.json exists', async () => {
   const { manager } = buildManager(standardScript())
   await assert.rejects(runDebugAction({}, { action: 'launch' }, manager, testLimits), /requires 'program'/)
   await manager.disposeAll()
+})
+
+test('launch automatically reads .vscode/launch.json when program is omitted or launch_config is given', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'dap-tool-ws-'))
+  try {
+    const vscodeDir = join(tmpDir, '.vscode')
+    mkdirSync(vscodeDir, { recursive: true })
+    const launchJson = `
+    {
+      "version": "0.2.0",
+      "configurations": [
+        {
+          "name": "Default Test App",
+          "type": "python",
+          "request": "launch",
+          "program": "\${workspaceFolder}/test_app.py",
+          "args": ["--verbose"],
+          "stopOnEntry": false
+        },
+        {
+          "name": "Named Config",
+          "type": "node",
+          "request": "launch",
+          "program": "\${workspaceFolder}/server.js"
+        }
+      ]
+    }
+    `
+    writeFileSync(join(vscodeDir, 'launch.json'), launchJson, 'utf8')
+
+    let launchedProgram = ''
+    let launchedArgs = []
+    const script = standardScript({
+      launch: (server, request) => {
+        launchedProgram = request.arguments.program
+        launchedArgs = request.arguments.args
+        server.respond(request.seq, 'launch')
+        server.emit('initialized')
+        if (request.arguments?.stopOnEntry !== false) {
+          server.emit('stopped', { reason: 'entry', threadId: 1 })
+        }
+      },
+    })
+    const { manager } = buildManager(script)
+    const owner = {}
+
+    // 1. Zero-param launch (omitting program) picking default first config
+    const res1 = await runDebugAction(owner, { action: 'launch', cwd: tmpDir }, manager, testLimits)
+    assert.ok(res1.session_id)
+    assert.equal(launchedProgram, join(tmpDir, 'test_app.py'))
+    assert.deepEqual(launchedArgs, ['--verbose'])
+
+    // 2. Launch with explicit launch_config name
+    const res2 = await runDebugAction(owner, { action: 'launch', cwd: tmpDir, launch_config: 'Named Config' }, manager, testLimits)
+    assert.ok(res2.session_id)
+    assert.equal(launchedProgram, join(tmpDir, 'server.js'))
+
+    await manager.disposeAll()
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
 })
 
 test('set_breakpoints without lines is an argument error', async () => {
@@ -502,3 +566,82 @@ test('runDebugAction drives reverse_continue, terminate, and extended inspection
 
   await manager.disposeAll()
 })
+
+test('launch action executes preLaunchTask from .vscode/tasks.json before starting DAP session', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'dap-tool-prelaunch-'))
+  try {
+    const vscodeDir = join(tmpDir, '.vscode')
+    mkdirSync(vscodeDir, { recursive: true })
+
+    const tasksJson = `
+    {
+      "version": "2.0.0",
+      "tasks": [
+        {
+          "label": "build-step",
+          "type": "shell",
+          "command": "node -e \\"console.log('prelaunch task ran')\\""
+        },
+        {
+          "label": "failing-build",
+          "type": "shell",
+          "command": "node -e \\"console.error('build failed'); process.exit(1)\\""
+        }
+      ]
+    }
+    `
+    const launchJson = `
+    {
+      "version": "0.2.0",
+      "configurations": [
+        {
+          "name": "App With Build",
+          "type": "node",
+          "request": "launch",
+          "program": "\${workspaceFolder}/app.js",
+          "preLaunchTask": "build-step"
+        },
+        {
+          "name": "App With Failing Build",
+          "type": "node",
+          "request": "launch",
+          "program": "\${workspaceFolder}/app.js",
+          "preLaunchTask": "failing-build"
+        }
+      ]
+    }
+    `
+    writeFileSync(join(vscodeDir, 'tasks.json'), tasksJson, 'utf8')
+    writeFileSync(join(vscodeDir, 'launch.json'), launchJson, 'utf8')
+
+    const { manager } = buildManager(standardScript())
+    const owner = {}
+
+    // Successful preLaunchTask run
+    const successRes = await runDebugAction(
+      owner,
+      { action: 'launch', cwd: tmpDir, launch_config: 'App With Build' },
+      manager,
+      testLimits,
+    )
+    assert.equal(successRes.action, 'launch')
+    assert.ok(successRes.snapshot.id)
+
+    await manager.disposeAll()
+
+    // Failing preLaunchTask run
+    await assert.rejects(
+      () =>
+        runDebugAction(
+          owner,
+          { action: 'launch', cwd: tmpDir, launch_config: 'App With Failing Build' },
+          manager,
+          testLimits,
+        ),
+      /build failed/,
+    )
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+

@@ -12,6 +12,7 @@ import {
   type SessionLimits,
 } from './session.js'
 import { renderDebugText, type DebugToolValue } from './format.js'
+import { resolveLaunchConfig, runPreLaunchTask } from './adapters.js'
 
 export const DEBUG_ACTIONS = [
   'launch',
@@ -113,7 +114,8 @@ const debugParameters = {
     type: 'string',
     description: "Adapter id for launch: 'debugpy' (Python), 'dlv' (Go), 'netcoredbg' (.NET), or a config-declared id. Guessed from the program extension when omitted; required for attach (cannot guess from a pid).",
   },
-  program: { type: 'string', description: 'Program path for launch (a .py/.go source, a .NET dll/exe, or whatever the adapter launches).' },
+  program: { type: 'string', description: 'Program path for launch (a .py/.go source, a .NET dll/exe, or whatever the adapter launches). Optional if launch_config or .vscode/launch.json is present.' },
+  launch_config: { type: 'string', description: 'Name of the configuration in .vscode/launch.json to launch (e.g. "Python: Current File" or "Debug App"). When program is omitted, defaults to the first configuration in launch.json.' },
   args: { type: 'array', items: { type: 'string' }, description: 'Command-line arguments passed to the program at launch.' },
   cwd: { type: 'string', description: 'Working directory for launch (default: process cwd).' },
   stop_on_entry: { type: 'boolean', description: 'Break immediately at program entry / on attach (default: true for launch, false for attach).' },
@@ -208,6 +210,7 @@ export interface DebugArgs {
   session_id?: string
   adapter?: string
   program?: string
+  launch_config?: string
   args?: string[]
   cwd?: string
   stop_on_entry?: boolean
@@ -271,17 +274,56 @@ export async function runDebugAction(
 ): Promise<DebugToolValue> {
   switch (args.action) {
     case 'launch': {
-      if (args.program === undefined || args.program.length === 0) {
-        throw new DebugError('invalid_arguments', "action 'launch' requires 'program'.")
+      let program = args.program
+      let adapterId = args.adapter
+      let launchArgs = args.args
+      let cwd = args.cwd
+      let stopOnEntry = args.stop_on_entry
+      let env: Record<string, string> | undefined
+      let extraLaunchArgs: Record<string, unknown> | undefined
+      let preLaunchTask: string | undefined
+
+      if (args.launch_config !== undefined || program === undefined || program.length === 0) {
+        const resolved = resolveLaunchConfig({
+          workspaceDir: cwd ?? process.cwd(),
+          launchConfigName: args.launch_config,
+          program,
+        })
+        if (resolved) {
+          if (!program && resolved.program) program = resolved.program
+          if (!adapterId && resolved.adapter) adapterId = resolved.adapter
+          if (!launchArgs && resolved.args) launchArgs = resolved.args
+          if (!cwd && resolved.cwd) cwd = resolved.cwd
+          if (stopOnEntry === undefined && resolved.stopOnEntry !== undefined) stopOnEntry = resolved.stopOnEntry
+          if (resolved.env) env = resolved.env
+          if (resolved.preLaunchTask) preLaunchTask = resolved.preLaunchTask
+          if (Object.keys(resolved.extraLaunchArgs).length > 0) extraLaunchArgs = resolved.extraLaunchArgs
+        }
       }
+
+      if (preLaunchTask) {
+        try {
+          await runPreLaunchTask(preLaunchTask, cwd ?? process.cwd(), signal)
+        } catch (error: unknown) {
+          const msg = error instanceof Error ? error.message : String(error)
+          throw new DebugError('adapter_error', msg)
+        }
+      }
+
+      if (program === undefined || program.length === 0) {
+        throw new DebugError('invalid_arguments', "action 'launch' requires 'program' (or a matching configuration in .vscode/launch.json).")
+      }
+
       const snapshot = await manager.launch(
         owner,
         {
-          adapterId: args.adapter,
-          program: args.program,
-          args: args.args,
-          cwd: args.cwd,
-          stopOnEntry: args.stop_on_entry,
+          adapterId,
+          program,
+          args: launchArgs,
+          cwd,
+          env,
+          stopOnEntry,
+          extraLaunchArgs,
         },
         signal,
       )
@@ -669,8 +711,17 @@ export async function runDebugAction(
         hitCondition: bp.hit_condition,
       }))
       const shorthand =
-        explicit.length === 0 && (args.address !== undefined || args.watch_name !== undefined || args.data_id !== undefined)
-          ? [{ dataId: args.data_id, address: args.address, name: args.watch_name, accessType: args.access_type, condition: args.condition, hitCondition: args.hit_condition }]
+        explicit.length === 0 && (args.address !== undefined || args.watch_name !== undefined || args.data_id !== undefined || args.name !== undefined)
+          ? [{
+              dataId: args.data_id,
+              address: args.address,
+              name: args.watch_name ?? args.name,
+              variablesReference: args.variables_ref,
+              frameId: args.frame_id,
+              accessType: args.access_type,
+              condition: args.condition,
+              hitCondition: args.hit_condition,
+            }]
           : []
       const breakpoints = await session.setDataBreakpoints([...explicit, ...shorthand], signal)
       return { action: 'set_data_breakpoints', session_id: session.id, snapshot: session.snapshot(), breakpoints: breakpoints.map(bp => ({ id: String(bp.id), verified: bp.verified, message: bp.message })) }

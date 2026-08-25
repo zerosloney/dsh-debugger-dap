@@ -94,6 +94,27 @@ export function formatSnapshotLines(snapshot: DebugSnapshot): string[] {
   if (snapshot.program !== undefined && snapshot.program.length > 0) lines.push(`Program: ${snapshot.program}`)
   if (snapshot.cwd !== undefined && snapshot.cwd.length > 0) lines.push(`CWD: ${snapshot.cwd}`)
   if (snapshot.stopReason !== undefined) lines.push(`Stop reason: ${snapshot.stopReason}`)
+  if (snapshot.exceptionDetails !== undefined) {
+    const exc = snapshot.exceptionDetails
+    const title = exc.exceptionId ? `💥 Exception: ${exc.exceptionId}` : '💥 Exception triggered'
+    lines.push(exc.description && exc.description !== exc.exceptionId ? `${title} (${exc.description})` : title)
+    if (exc.message && exc.message !== exc.description) lines.push(`  Message: ${exc.message}`)
+    if (exc.typeName) lines.push(`  Type: ${exc.typeName}`)
+    if (exc.stack) {
+      const topStack = exc.stack.split('\n')[0]?.trim()
+      if (topStack) lines.push(`  Stack: ${topStack}`)
+    }
+  } else if (snapshot.stopReason === 'exception') {
+    lines.push('💥 Exception triggered (use action "exception_info" for full details)')
+  }
+  if (snapshot.threadsSummary !== undefined && snapshot.threadsSummary.length > 1) {
+    lines.push(`Threads (${snapshot.threadsSummary.length}):`)
+    for (const t of snapshot.threadsSummary) {
+      const marker = t.id === snapshot.threadId ? '*' : ' '
+      const state = t.stopped ? (t.reason ? `stopped (${t.reason})` : 'stopped') : 'running'
+      lines.push(`${marker} [Thread #${t.id}: ${t.name}] ${state}`)
+    }
+  }
   if (snapshot.allThreadsStopped === true) lines.push('All threads stopped')
   if (snapshot.frame !== undefined) lines.push(`Frame: ${snapshot.frame.name}`)
   const location = formatLocation(snapshot)
@@ -214,6 +235,9 @@ export function formatOutcome(value: DebugToolValue, timeoutMs: number): string[
   }
   if (value.state === 'stopped') {
     lines.push(`Stopped at ${formatLocation(value.snapshot) ?? 'unknown location'}.`)
+    if (value.snapshot?.stopReason === 'exception') {
+      lines.push('💡 Hint: Call action "exception_info" for full traceback, or "evaluate" / "variables" to inspect context.')
+    }
     return lines
   }
   if (value.state === 'terminated') {
@@ -413,8 +437,16 @@ export function renderDebugText(value: DebugToolValue, maxResultChars: number, s
     case 'read_memory': {
       sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
       const mem = value.memory
-      sections.push(`Memory at ${mem?.address ?? '0x0'}${mem?.unreadable_bytes !== undefined ? ` (${mem.unreadable_bytes} unreadable bytes)` : ''}:`)
-      sections.push(mem?.data !== undefined ? `Data (base64): ${mem.data}` : '(no data)')
+      const addr = mem?.address ?? '0x0'
+      const unreadable = mem?.unreadable_bytes !== undefined ? ` (${mem.unreadable_bytes} unreadable bytes)` : ''
+      if (mem?.data !== undefined && mem.data.length > 0) {
+        const hexdumpLines = formatHexDump(mem.data, addr)
+        const byteCount = Buffer.from(mem.data, 'base64').length
+        sections.push(`Memory at ${addr} (${byteCount} bytes${unreadable}):`)
+        sections.push(...hexdumpLines)
+      } else {
+        sections.push(`Memory at ${addr}${unreadable}: (no data)`)
+      }
       break
     }
     case 'completions': {
@@ -455,4 +487,55 @@ export function renderDebugText(value: DebugToolValue, maxResultChars: number, s
   if (text.length <= maxResultChars) return text
   const notice = `\n… truncated (limit ${maxResultChars} characters).`
   return `${text.slice(0, Math.max(0, maxResultChars - notice.length))}${notice}`
+}
+
+/**
+ * Render raw memory bytes into standard hexdump (-C style) with offset, hex bytes, and printable ASCII.
+ */
+export function formatHexDump(base64Data: string, baseAddress = '0x0'): string[] {
+  let buf: Buffer
+  try {
+    buf = Buffer.from(base64Data, 'base64')
+  } catch {
+    return [`(invalid base64: ${base64Data})`]
+  }
+  if (buf.length === 0) return ['(0 bytes)']
+
+  let startAddr = 0n
+  try {
+    const rawAddr = baseAddress.trim()
+    if (rawAddr.startsWith('0x') || rawAddr.startsWith('0X')) {
+      startAddr = BigInt(rawAddr)
+    } else if (/^\d+$/.test(rawAddr)) {
+      startAddr = BigInt(rawAddr)
+    } else if (/^[0-9a-fA-F]+$/.test(rawAddr)) {
+      startAddr = BigInt(`0x${rawAddr}`)
+    }
+  } catch {
+    startAddr = 0n
+  }
+
+  const is64Bit = startAddr > 0xffffffffn
+  const addrPad = is64Bit ? 16 : 8
+  const lines: string[] = []
+
+  for (let offset = 0; offset < buf.length; offset += 16) {
+    const chunk = buf.subarray(offset, Math.min(offset + 16, buf.length))
+    const currentAddr = '0x' + (startAddr + BigInt(offset)).toString(16).padStart(addrPad, '0')
+    const hexBytes: string[] = []
+    let asciiChars = ''
+    for (let i = 0; i < 16; i++) {
+      if (i < chunk.length) {
+        const byte = chunk[i]
+        hexBytes.push(byte.toString(16).padStart(2, '0'))
+        asciiChars += byte >= 32 && byte <= 126 ? String.fromCharCode(byte) : '.'
+      } else {
+        hexBytes.push('  ')
+      }
+    }
+    const hexPart1 = hexBytes.slice(0, 8).join(' ')
+    const hexPart2 = hexBytes.slice(8, 16).join(' ')
+    lines.push(`  ${currentAddr}  ${hexPart1}  ${hexPart2}  |${asciiChars}|`)
+  }
+  return lines
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { renderDebugText } from '../lib/format.js'
+import { renderDebugText, formatHexDump } from '../lib/format.js'
 
 const baseSnapshot = {
   id: 'dbg-1',
@@ -194,8 +194,9 @@ test('renders data_breakpoint_info, disassemble, read_memory, completions, and t
     snapshot: baseSnapshot,
     memory: { address: '0x1000', data: 'AQIDBA==' },
   }, 16000)
-  assert.ok(mem.includes('Memory at 0x1000:'))
-  assert.ok(mem.includes('AQIDBA=='))
+  assert.ok(mem.includes('Memory at 0x1000 (4 bytes):'))
+  assert.ok(mem.includes('0x00001000'))
+  assert.ok(mem.includes('01 02 03 04'))
 
   const comp = renderDebugText({
     action: 'completions',
@@ -208,3 +209,51 @@ test('renders data_breakpoint_info, disassemble, read_memory, completions, and t
   const term = renderDebugText({ action: 'terminate', snapshot: { ...baseSnapshot, status: 'terminated' } }, 16000)
   assert.ok(term.includes('Debuggee terminated.'))
 })
+
+test('formatHexDump renders 16-byte aligned hexdump with ASCII column', () => {
+  const b64 = Buffer.from('Hello World! 1234').toString('base64')
+  const lines = formatHexDump(b64, '0x7fffffffe000')
+  assert.equal(lines.length, 2)
+  assert.ok(lines[0].includes('0x00007fffffffe000'))
+  assert.ok(lines[0].includes('48 65 6c 6c 6f 20 57 6f'))
+  assert.ok(lines[0].includes('|Hello World! 123|'))
+  assert.ok(lines[1].includes('0x00007fffffffe010'))
+  assert.ok(lines[1].includes('|4|'))
+})
+
+test('exception stop renders exception banner, details and diagnostic hint', () => {
+  const excSnapshot = {
+    ...baseSnapshot,
+    stopReason: 'exception',
+    exceptionDetails: {
+      exceptionId: 'ZeroDivisionError',
+      description: 'division by zero',
+      message: 'division by zero',
+      typeName: 'ZeroDivisionError',
+      stack: 'File "app.py", line 42, in calculate\n    return x / 0\nZeroDivisionError: division by zero',
+    },
+  }
+  const text = renderDebugText({ action: 'continue', state: 'stopped', snapshot: excSnapshot }, 16000)
+  assert.ok(text.includes('💥 Exception: ZeroDivisionError (division by zero)'))
+  assert.ok(text.includes('Type: ZeroDivisionError'))
+  assert.ok(text.includes('Stack: File "app.py", line 42, in calculate'))
+  assert.ok(text.includes('💡 Hint: Call action "exception_info"'))
+})
+
+test('threads summary renders multi-thread status overview', () => {
+  const multiThreadSnapshot = {
+    ...baseSnapshot,
+    threadId: 1,
+    threadsSummary: [
+      { id: 1, name: 'MainThread', stopped: true, reason: 'breakpoint' },
+      { id: 2, name: 'Worker-1', stopped: true, reason: 'breakpoint' },
+      { id: 3, name: 'IO-Pool', stopped: false },
+    ],
+  }
+  const text = renderDebugText({ action: 'launch', session_id: 'dbg-1', snapshot: multiThreadSnapshot }, 16000)
+  assert.ok(text.includes('Threads (3):'))
+  assert.ok(text.includes('* [Thread #1: MainThread] stopped (breakpoint)'))
+  assert.ok(text.includes('  [Thread #2: Worker-1] stopped (breakpoint)'))
+  assert.ok(text.includes('  [Thread #3: IO-Pool] running'))
+})
+

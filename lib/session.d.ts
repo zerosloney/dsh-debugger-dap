@@ -46,6 +46,22 @@ export interface DebugSnapshot {
         value?: string;
         error?: string;
     }>;
+    /** Exception details if stopped due to an exception. */
+    exceptionDetails?: {
+        exceptionId: string;
+        description?: string;
+        breakMode?: string;
+        message?: string;
+        typeName?: string;
+        stack?: string;
+    };
+    /** Multi-thread summary overview when more than 1 thread is active. */
+    threadsSummary?: Array<{
+        id: number;
+        name: string;
+        stopped?: boolean;
+        reason?: string;
+    }>;
     /** Adapter capabilities relevant to model decisions, from the initialize handshake. */
     capabilities?: {
         set_variable?: boolean;
@@ -113,6 +129,20 @@ export declare class DebugSession {
     capabilities: DapCapabilities;
     /** Whether the last stop halted every thread (allThreadsStopped). */
     allThreadsStopped: boolean | undefined;
+    exceptionDetails: {
+        exceptionId: string;
+        description?: string;
+        breakMode?: string;
+        message?: string;
+        typeName?: string;
+        stack?: string;
+    } | undefined;
+    threadsSummary: Array<{
+        id: number;
+        name: string;
+        stopped?: boolean;
+        reason?: string;
+    }> | undefined;
     private stopReasonDescription;
     private configurationDoneSent;
     private readonly outputLines;
@@ -124,6 +154,7 @@ export declare class DebugSession {
     private disposed;
     private cwdValue;
     private initializedSeen;
+    private multipleThreadsSeen;
     private lastActivityAt;
     /** Session creation time; also the ledger's duration baseline. */
     private readonly startedAt;
@@ -260,6 +291,8 @@ export declare class DebugSession {
         dataId?: string;
         address?: string;
         name?: string;
+        variablesReference?: number;
+        frameId?: number;
         accessType?: 'read' | 'write' | 'readWrite';
         condition?: string;
         hitCondition?: string;
@@ -316,7 +349,9 @@ export interface ManagerLaunchRequest {
     program: string;
     args?: readonly string[];
     cwd?: string;
+    env?: Record<string, string>;
     stopOnEntry?: boolean;
+    extraLaunchArgs?: Record<string, unknown>;
 }
 /** One attach request as handed to the manager. */
 export interface ManagerAttachRequest {

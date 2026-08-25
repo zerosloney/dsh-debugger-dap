@@ -156,3 +156,7 @@ export declare function formatSessions(sessions: DebugSnapshot[]): string[];
 export declare function formatOutput(page: OutputPage): string[];
 /** Render the canonical value into one bounded text block. `stepTimeoutMs` is the configured resume deadline, shown in the timeout hint. */
 export declare function renderDebugText(value: DebugToolValue, maxResultChars: number, stepTimeoutMs?: number): string;
+/**
+ * Render raw memory bytes into standard hexdump (-C style) with offset, hex bytes, and printable ASCII.
+ */
+export declare function formatHexDump(base64Data: string, baseAddress?: string): string[];

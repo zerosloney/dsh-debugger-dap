@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { resolveAdapter } from '../lib/adapters.js'
+import {
+  resolveAdapter,
+  expandPath,
+  stripJsonComments,
+  resolveVsCodeVariables,
+  mapVsCodeTypeToAdapter,
+  resolveLaunchConfig,
+  readTasksConfigurations,
+  resolveTaskCommand,
+  runPreLaunchTask,
+} from '../lib/adapters.js'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const pythonPresent = command => command === 'python'
 const nothing = () => false
@@ -131,3 +144,272 @@ test('config rows carry announceStream into the resolved spec', () => {
   assert.equal(spec.transport, 'tcp')
   assert.equal(spec.announceStream, 'stderr')
 })
+
+test('expandPath expands ~ and environment variables', () => {
+  const home = process.env.HOME || process.env.USERPROFILE || ''
+  assert.equal(expandPath('~'), home)
+  assert.equal(expandPath('~/foo/bar'), `${home}/foo/bar`.replace(/\//g, process.platform === 'win32' ? '\\' : '/'))
+
+  process.env.TEST_DAP_VAR = 'hello_world'
+  assert.equal(expandPath('%TEST_DAP_VAR%/sub'), 'hello_world/sub')
+  assert.equal(expandPath('${TEST_DAP_VAR}/sub'), 'hello_world/sub')
+})
+
+test('config rows expand ~ and env variables in command, args, and cwd', () => {
+  const home = process.env.HOME || process.env.USERPROFILE || ''
+  const config = {
+    'custom-js': {
+      command: 'node',
+      args: ['~/.vscode/extensions/ms-vscode.js-debug/dist/src/dapDebugServer.js'],
+      cwd: '~/my-project',
+      transport: 'tcp',
+    },
+  }
+  const spec = resolveAdapter({ adapter: 'custom-js', program: '/w/x' }, config, () => false)
+  assert.ok(spec.args[0].startsWith(home))
+  assert.ok(spec.cwd?.startsWith(home))
+})
+
+test('resolveAdapter auto-discovers js-debug when extension is found', () => {
+  const fakeFind = (prefix) => {
+    if (prefix === 'ms-vscode.js-debug') return '/Users/user/.vscode/extensions/ms-vscode.js-debug-1.98.0/dist/src/dapDebugServer.js'
+    return undefined
+  }
+  const spec = resolveAdapter({ program: '/w/server.js' }, undefined, (cmd) => cmd === 'node', fakeFind)
+  assert.equal(spec.command, 'node')
+  assert.deepEqual(spec.args, ['/Users/user/.vscode/extensions/ms-vscode.js-debug-1.98.0/dist/src/dapDebugServer.js'])
+  assert.equal(spec.transport, 'tcp')
+  assert.deepEqual(spec.launchArgs, { type: 'node', sourceMaps: true })
+})
+
+test('resolveAdapter auto-discovers codelldb when codelldb is not on PATH', () => {
+  const fakeFind = (prefix) => {
+    if (prefix === 'vadimcn.vscode-lldb') return '/Users/user/.vscode/extensions/vadimcn.vscode-lldb-1.10.0/adapter/codelldb'
+    return undefined
+  }
+  const spec = resolveAdapter({ program: '/w/main.rs' }, undefined, () => false, fakeFind)
+  assert.equal(spec.command, '/Users/user/.vscode/extensions/vadimcn.vscode-lldb-1.10.0/adapter/codelldb')
+  assert.deepEqual(spec.args, ['--port', '0'])
+  assert.equal(spec.transport, 'tcp')
+})
+
+test('stripJsonComments strips comments and trailing commas', () => {
+  const jsonc = `
+  {
+    // Single line comment
+    "version": "0.2.0", /* block comment */
+    "configurations": [
+      {
+        "name": "App",
+        "type": "python",
+        "program": "main.py", // comment after value
+      },
+    ],
+  }
+  `
+  const cleaned = stripJsonComments(jsonc)
+  const parsed = JSON.parse(cleaned)
+  assert.equal(parsed.version, '0.2.0')
+  assert.equal(parsed.configurations.length, 1)
+  assert.equal(parsed.configurations[0].name, 'App')
+})
+
+test('resolveVsCodeVariables expands workspaceFolder and env variables', () => {
+  process.env.TEST_PORT = '9000'
+  const config = {
+    program: '${workspaceFolder}/src/app.py',
+    args: ['--port', '${env:TEST_PORT}'],
+    cwd: '${workspaceFolder}',
+    file: '${fileBasename}',
+  }
+  const resolved = resolveVsCodeVariables(config, '/home/user/myproject', '/home/user/myproject/src/index.ts')
+  assert.equal(resolved.program, join('/home/user/myproject', 'src', 'app.py'))
+  assert.deepEqual(resolved.args, ['--port', '9000'])
+  assert.equal(resolved.cwd, join('/home/user/myproject'))
+  assert.equal(resolved.file, 'index.ts')
+})
+
+test('mapVsCodeTypeToAdapter maps VS Code types to DAP adapter IDs', () => {
+  assert.equal(mapVsCodeTypeToAdapter('python'), 'debugpy')
+  assert.equal(mapVsCodeTypeToAdapter('pwa-node'), 'js-debug')
+  assert.equal(mapVsCodeTypeToAdapter('node'), 'js-debug')
+  assert.equal(mapVsCodeTypeToAdapter('lldb'), 'codelldb')
+  assert.equal(mapVsCodeTypeToAdapter('coreclr'), 'netcoredbg')
+  assert.equal(mapVsCodeTypeToAdapter('go'), 'dlv')
+  assert.equal(mapVsCodeTypeToAdapter('custom-adapter'), 'custom-adapter')
+})
+
+test('resolveLaunchConfig parses .vscode/launch.json and matches by name or default', () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'dap-test-ws-'))
+  try {
+    const vscodeDir = join(tmpDir, '.vscode')
+    mkdirSync(vscodeDir, { recursive: true })
+    const launchJson = `
+    {
+      "version": "0.2.0",
+      "configurations": [
+        {
+          "name": "Python: Main",
+          "type": "python",
+          "request": "launch",
+          "program": "\${workspaceFolder}/app.py",
+          "args": ["--mode", "debug"],
+          "stopOnEntry": true,
+          "justMyCode": false
+        },
+        {
+          "name": "Node: Server",
+          "type": "pwa-node",
+          "request": "launch",
+          "program": "\${workspaceFolder}/dist/server.js"
+        }
+      ]
+    }
+    `
+    writeFileSync(join(vscodeDir, 'launch.json'), launchJson, 'utf8')
+
+    // Default (first config)
+    const def = resolveLaunchConfig({ workspaceDir: tmpDir })
+    assert.ok(def)
+    assert.equal(def.name, 'Python: Main')
+    assert.equal(def.adapter, 'debugpy')
+    assert.equal(def.program, join(tmpDir, 'app.py'))
+    assert.deepEqual(def.args, ['--mode', 'debug'])
+    assert.equal(def.stopOnEntry, true)
+    assert.deepEqual(def.extraLaunchArgs, { justMyCode: false })
+
+    // Match by name
+    const node = resolveLaunchConfig({ workspaceDir: tmpDir, launchConfigName: 'Node: Server' })
+    assert.ok(node)
+    assert.equal(node.name, 'Node: Server')
+    assert.equal(node.adapter, 'js-debug')
+    assert.equal(node.program, join(tmpDir, 'dist', 'server.js'))
+
+    // Non-existent name returns undefined
+    const none = resolveLaunchConfig({ workspaceDir: tmpDir, launchConfigName: 'NonExistent' })
+    assert.equal(none, undefined)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('readTasksConfigurations and resolveTaskCommand parse tasks.json', () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'dap-test-tasks-'))
+  try {
+    const vscodeDir = join(tmpDir, '.vscode')
+    mkdirSync(vscodeDir, { recursive: true })
+    const tasksJson = `
+    {
+      "version": "2.0.0",
+      "tasks": [
+        {
+          "label": "build",
+          "type": "shell",
+          "command": "node -e \\"console.log('building...')\\"",
+          "options": {
+            "cwd": "\${workspaceFolder}"
+          }
+        },
+        {
+          "label": "npm-build",
+          "type": "npm",
+          "script": "compile"
+        }
+      ]
+    }
+    `
+    writeFileSync(join(vscodeDir, 'tasks.json'), tasksJson, 'utf8')
+
+    const tasks = readTasksConfigurations(tmpDir)
+    assert.equal(tasks.length, 2)
+    assert.equal(tasks[0].label, 'build')
+
+    const resolvedBuild = resolveTaskCommand('build', tmpDir)
+    assert.ok(resolvedBuild)
+    assert.ok(resolvedBuild.command.includes('building...'))
+    assert.equal(resolvedBuild.cwd, tmpDir)
+
+    const resolvedNpm = resolveTaskCommand('npm-build', tmpDir)
+    assert.ok(resolvedNpm)
+    assert.equal(resolvedNpm.command, 'npm')
+    assert.deepEqual(resolvedNpm.args, ['run', 'compile'])
+
+    const notFound = resolveTaskCommand('non-existent', tmpDir)
+    assert.equal(notFound, undefined)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('runPreLaunchTask executes task command successfully and handles errors', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'dap-test-task-exec-'))
+  try {
+    const vscodeDir = join(tmpDir, '.vscode')
+    mkdirSync(vscodeDir, { recursive: true })
+    const tasksJson = `
+    {
+      "version": "2.0.0",
+      "tasks": [
+        {
+          "label": "success-task",
+          "type": "shell",
+          "command": "node -e \\"console.log('compile-success')\\""
+        },
+        {
+          "label": "fail-task",
+          "type": "shell",
+          "command": "node -e \\"console.error('syntax error in src'); process.exit(1)\\""
+        }
+      ]
+    }
+    `
+    writeFileSync(join(vscodeDir, 'tasks.json'), tasksJson, 'utf8')
+
+    const res = await runPreLaunchTask('success-task', tmpDir)
+    assert.equal(res.success, true)
+    assert.ok(res.output.includes('compile-success'))
+
+    await assert.rejects(
+      () => runPreLaunchTask('fail-task', tmpDir),
+      /syntax error in src/,
+    )
+
+    await assert.rejects(
+      () => runPreLaunchTask('unknown-task', tmpDir),
+      /was not found in \.vscode\/tasks\.json/,
+    )
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('resolveLaunchConfig extracts preLaunchTask and integrates with launch.json', () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'dap-test-prelaunch-'))
+  try {
+    const vscodeDir = join(tmpDir, '.vscode')
+    mkdirSync(vscodeDir, { recursive: true })
+    const launchJson = `
+    {
+      "version": "0.2.0",
+      "configurations": [
+        {
+          "name": "Rust: Run",
+          "type": "lldb",
+          "request": "launch",
+          "program": "\${workspaceFolder}/target/debug/app",
+          "preLaunchTask": "cargo-build"
+        }
+      ]
+    }
+    `
+    writeFileSync(join(vscodeDir, 'launch.json'), launchJson, 'utf8')
+
+    const resolved = resolveLaunchConfig({ workspaceDir: tmpDir })
+    assert.ok(resolved)
+    assert.equal(resolved.name, 'Rust: Run')
+    assert.equal(resolved.preLaunchTask, 'cargo-build')
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
