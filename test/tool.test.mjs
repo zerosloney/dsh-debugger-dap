@@ -408,3 +408,97 @@ test('execute normalizes transport errors into stable DebugError codes', async (
   await failManager.disposeAll()
   await manager.disposeAll()
 })
+
+test('runDebugAction drives reverse_continue, terminate, and extended inspection actions', async () => {
+  const script = standardScript({
+    initialize: (server, request) =>
+      server.respond(request.seq, 'initialize', {
+        capabilities: {
+          supportsConfigurationDoneRequest: true,
+          supportsStepBack: true,
+          supportsDataBreakpoints: true,
+          supportsDisassembleRequest: true,
+          supportsReadMemoryRequest: true,
+          supportsCompletionsRequest: true,
+          supportsTerminateRequest: true,
+        },
+      }),
+    reverseContinue: (server, request) => {
+      server.respond(request.seq, 'reverseContinue')
+      server.emit('stopped', { reason: 'step', threadId: 1 })
+    },
+    dataBreakpointInfo: (server, request) =>
+      server.respond(request.seq, 'dataBreakpointInfo', {
+        dataId: 'd_ptr',
+        description: 'data pointer',
+        accessTypes: ['write'],
+        canPersist: true,
+      }),
+    setDataBreakpoints: (server, request) =>
+      server.respond(request.seq, 'setDataBreakpoints', {
+        breakpoints: [{ id: 1, verified: true }],
+      }),
+    disassemble: (server, request) =>
+      server.respond(request.seq, 'disassemble', {
+        instructions: [{ address: '0x10', instruction: 'nop' }],
+      }),
+    readMemory: (server, request) =>
+      server.respond(request.seq, 'readMemory', {
+        address: '0x10',
+        data: 'AAAA',
+      }),
+    completions: (server, request) =>
+      server.respond(request.seq, 'completions', {
+        targets: [{ label: 'testComplete', type: 'method' }],
+      }),
+    variables: (server, request) => {
+      assert.equal(request.arguments?.filter, 'named')
+      assert.equal(request.arguments?.format?.hex, true)
+      return server.respond(request.seq, 'variables', {
+        variables: [{ name: 'hexVal', value: '0x2a', variablesReference: 0 }],
+      })
+    },
+    evaluate: (server, request) => {
+      assert.equal(request.arguments?.format?.hex, true)
+      return server.respond(request.seq, 'evaluate', {
+        result: '0x2a',
+        variablesReference: 0,
+      })
+    },
+    terminate: (server, request) => server.respond(request.seq, 'terminate'),
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await runDebugAction(owner, { action: 'launch', program: '/w/app.py' }, manager, testLimits)
+
+  const rev = await runDebugAction(owner, { action: 'reverse_continue', single_thread: true }, manager, testLimits)
+  assert.equal(rev.action, 'reverse_continue')
+  assert.equal(rev.state, 'stopped')
+
+  const dataInfo = await runDebugAction(owner, { action: 'data_breakpoint_info', name: 'ptr' }, manager, testLimits)
+  assert.equal(dataInfo.data_breakpoint_info.data_id, 'd_ptr')
+
+  const dataBp = await runDebugAction(owner, { action: 'set_data_breakpoints', data_id: 'd_ptr', access_type: 'write' }, manager, testLimits)
+  assert.equal(dataBp.breakpoints.length, 1)
+
+  const disasm = await runDebugAction(owner, { action: 'disassemble', memory_reference: '0x10' }, manager, testLimits)
+  assert.equal(disasm.instructions.length, 1)
+  assert.equal(disasm.instructions[0].instruction, 'nop')
+
+  const mem = await runDebugAction(owner, { action: 'read_memory', memory_reference: '0x10' }, manager, testLimits)
+  assert.equal(mem.memory.data, 'AAAA')
+
+  const comp = await runDebugAction(owner, { action: 'completions', text: 'test' }, manager, testLimits)
+  assert.equal(comp.completions[0].label, 'testComplete')
+
+  const vars = await runDebugAction(owner, { action: 'variables', variables_ref: 100, filter: 'named', hex: true }, manager, testLimits)
+  assert.equal(vars.variables[0].value, '0x2a')
+
+  const evalRes = await runDebugAction(owner, { action: 'evaluate', expression: '42', hex: true }, manager, testLimits)
+  assert.equal(evalRes.evaluation.result, '0x2a')
+
+  const term = await runDebugAction(owner, { action: 'terminate' }, manager, testLimits)
+  assert.equal(term.snapshot.status, 'terminated')
+
+  await manager.disposeAll()
+})

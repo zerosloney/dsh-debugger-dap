@@ -4,12 +4,12 @@
 
 DAP 交互式调试器，作为 [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh-tools) 的独立插件：通过一个面向模型的 `debug` 工具完成启动调试适配器、断点、单步、栈/变量检视、表达式求值与程序输出捕获。零宿主源码改动，旁挂即用。
 
-> 📖 完整动作与参数示例见 **[USAGE.md](./USAGE.md)**（29 个动作：launch/attach、函数/异常/内存断点、步进、跳转、检视、源码/模块读取、运行时改值、异常信息等）。
+> 📖 完整动作与参数示例见 **[USAGE.md](./USAGE.md)**（41 个动作：launch/attach、函数/异常/数据断点、步进/反向继续、跳转、检视/分页/十六进制、内存读取与反汇编、REPL 补全、源码/模块读取、运行时改值、异常信息等）。
 
 
 ## 工具面
 
-单个 `debug` 工具，`action` 参数判别，共 35 个动作：
+单个 `debug` 工具，`action` 参数判别，共 41 个动作：
 
 | 动作 | 说明 | 分层 |
 |---|---|---|
@@ -19,21 +19,24 @@ DAP 交互式调试器，作为 [DeepSeek Harness](https://www.npmjs.com/package
 | `set_function_breakpoints` | 按函数名下断点（`functions` + `condition`/`hit_condition`） | 执行 |
 | `set_exception_breakpoints` | 配置哪些异常中断（`filters` 如 `['all']`，或 `filter_options`） | 执行 |
 | `continue` / `step_in` / `step_over` / `step_out` / `pause` | 恢复执行；等待下一次停机，结果附带自上次读取以来的增量输出 | 执行 |
-| `step_back` | 反向步进（需适配器声明 supportsStepBack）；等待下一次停机 | 执行 |
-| `evaluate` | 在当前帧上下文求值 | 执行 |
+| `step_back` / `reverse_continue` | 反向步进 / 反向继续（需适配器声明 `supportsStepBack`）；等待下一次停机 | 执行 |
+| `evaluate` | 在当前帧上下文求值（支持 `hex: true` 十六进制格式化） | 执行 |
 | `set_variable` / `set_expression` | 在 `variables_ref`/当前帧写入新值 | 执行 |
-| `disconnect` | 结束会话（默认终止被调试进程） | 执行 |
+| `disconnect` / `terminate` | 结束会话或优雅终止被调试进程（默认终止子进程） | 执行 |
 | `ledger` | 查询调试会话台账（启动/断点/异常/终止等关键事件；支持 `session_id`/`ledger_kinds`/`ledger_since`/`ledger_limit` 过滤） | 只读 |
-| `threads` / `stack_trace` / `scopes` / `variables` / `exception_info` / `output` / `sessions` | 检视与读取 | 只读 |
+| `threads` / `stack_trace` / `scopes` / `variables` / `exception_info` / `output` / `sessions` | 检视与读取（`variables` 支持 `start`/`count` 分页、`filter` 与 `hex`） | 只读 |
 | `select_thread` | 切换焦点线程（后续 step/stack_trace 使用该线程） | 执行 |
 | `add_watch` / `remove_watch` / `list_watches` | 观察表达式：登记后每次停机自动求值并随快照返回；按 watch_id 移除/列出 | 执行 |
 | `restart` | 按原始 launch 配置重启 debuggee | 执行 |
 | `source` | 读取当前停止位置的源码内容（支持 `source_reference` 取内存源） | 只读 |
 | `loaded_sources` | 列出 debuggee 已加载的所有源文件 | 只读 |
 | `modules` | 列出 debuggee 已加载的模块（支持 `start`/`count` 分页） | 只读 |
-| `set_data_breakpoints` | 设置内存断点（watchpoint）：地址或变量名 + 读写类型 | 执行 |
+| `data_breakpoint_info` / `set_data_breakpoints` | 查询数据断点能力与设置内存断点（watchpoint）：变量/地址 + 读写类型/条件 | 执行 |
 | `goto_targets` / `goto` | 查询可跳转行并执行非顺序跳转 | 执行 |
 | `restart_frame` | 重跑当前栈帧（重新进入当前函数） | 执行 |
+| `disassemble` | 反汇编指定内存引用/地址的机器指令（含符号与源码位置映射） | 只读 |
+| `read_memory` | 读取指定内存引用/地址的原始字节（base64 编码） | 只读 |
+| `completions` | 在当前栈帧与光标位置获取调试器 REPL 补全候选项 | 只读 |
 
 ## 会话台账（Ledger）
 

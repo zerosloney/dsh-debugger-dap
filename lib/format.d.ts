@@ -99,6 +99,38 @@ export interface DebugToolValue {
         label: string;
         line: number;
     }>;
+    data_breakpoint_info?: {
+        data_id: string | null;
+        description: string;
+        access_types?: string[];
+        can_persist?: boolean;
+    };
+    instructions?: Array<{
+        address: string;
+        instruction: string;
+        instruction_bytes?: string;
+        symbol?: string;
+        location?: {
+            path?: string;
+            name?: string;
+        };
+        line?: number;
+        column?: number;
+    }>;
+    memory?: {
+        address: string;
+        unreadable_bytes?: number;
+        data?: string;
+    };
+    completions?: Array<{
+        label: string;
+        text?: string;
+        sort_text?: string;
+        detail?: string;
+        type?: string;
+        start?: number;
+        length?: number;
+    }>;
     /** Ledger rows (action 'ledger'). */
     entries?: Array<{
         seq: number;

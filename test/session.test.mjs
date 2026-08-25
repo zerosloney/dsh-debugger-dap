@@ -540,3 +540,147 @@ test('disposeAll tears down every live session', async () => {
   assert.equal(manager.list(owner).length, 0)
   assert.ok(fake.killCount >= 2)
 })
+
+test('dataBreakpointInfo and setDataBreakpoints work with adapter capabilities', async () => {
+  const script = standardScript({
+    initialize: (server, request) =>
+      server.respond(request.seq, 'initialize', {
+        capabilities: { supportsConfigurationDoneRequest: true, supportsDataBreakpoints: true },
+      }),
+    dataBreakpointInfo: (server, request) =>
+      server.respond(request.seq, 'dataBreakpointInfo', {
+        dataId: `id_${request.arguments?.name}`,
+        description: `Read/write variable ${request.arguments?.name}`,
+        accessTypes: ['read', 'write', 'readWrite'],
+        canPersist: true,
+      }),
+    setDataBreakpoints: (server, request) =>
+      server.respond(request.seq, 'setDataBreakpoints', {
+        breakpoints: (request.arguments?.breakpoints ?? []).map((bp, i) => ({
+          id: i + 1,
+          verified: true,
+        })),
+      }),
+  })
+  const { manager, fake } = buildManager(script)
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py' })
+  const session = manager.sessionFor(owner)
+
+  const info = await session.dataBreakpointInfo('myVar')
+  assert.equal(info.dataId, 'id_myVar')
+  assert.equal(info.canPersist, true)
+  assert.deepEqual(info.accessTypes, ['read', 'write', 'readWrite'])
+
+  const bps = await session.setDataBreakpoints([{ dataId: 'id_myVar', accessType: 'write' }])
+  assert.equal(bps.length, 1)
+  assert.equal(bps[0].verified, true)
+  const lastSet = fake.server.received.find(m => m.command === 'setDataBreakpoints')
+  assert.equal(lastSet.arguments.breakpoints[0].dataId, 'id_myVar')
+  assert.equal(lastSet.arguments.breakpoints[0].accessType, 'write')
+  await manager.disposeAll()
+})
+
+test('gotoTargets and goto pass threadId and update location', async () => {
+  const script = standardScript({
+    initialize: (server, request) =>
+      server.respond(request.seq, 'initialize', {
+        capabilities: { supportsConfigurationDoneRequest: true, supportsGotoTargetsRequest: true },
+      }),
+    gotoTargets: (server, request) =>
+      server.respond(request.seq, 'gotoTargets', {
+        targets: [{ id: 101, label: 'line 50', line: 50 }],
+      }),
+    goto: (server, request) => {
+      server.respond(request.seq, 'goto')
+      server.emit('stopped', { reason: 'goto', threadId: request.arguments?.threadId ?? 1 })
+    },
+    stackTrace: (server, request) =>
+      server.respond(request.seq, 'stackTrace', {
+        stackFrames: [
+          { id: 10, name: 'doWork', source: { path: '/w/src/app.py' }, line: 50, column: 1 },
+        ],
+      }),
+  })
+  const { manager, fake } = buildManager(script)
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py' })
+  const session = manager.sessionFor(owner)
+
+  const targets = await session.gotoTargets(50)
+  assert.equal(targets.length, 1)
+  assert.equal(targets[0].id, 101)
+  assert.equal(targets[0].line, 50)
+
+  const snapshot = await session.goto(101)
+  assert.equal(snapshot.status, 'stopped')
+  assert.equal(snapshot.frame?.line, 50)
+  const gotoReq = fake.server.received.find(m => m.command === 'goto')
+  assert.equal(gotoReq.arguments.targetId, 101)
+  assert.equal(gotoReq.arguments.threadId, 1)
+  await manager.disposeAll()
+})
+
+test('restartFrame, disassemble, readMemory, completions and terminate', async () => {
+  const script = standardScript({
+    initialize: (server, request) =>
+      server.respond(request.seq, 'initialize', {
+        capabilities: {
+          supportsConfigurationDoneRequest: true,
+          supportsRestartFrame: true,
+          supportsDisassembleRequest: true,
+          supportsReadMemoryRequest: true,
+          supportsCompletionsRequest: true,
+          supportsTerminateRequest: true,
+        },
+      }),
+    restartFrame: (server, request) => {
+      server.respond(request.seq, 'restartFrame')
+      server.emit('stopped', { reason: 'restart', threadId: 1 })
+    },
+    disassemble: (server, request) =>
+      server.respond(request.seq, 'disassemble', {
+        instructions: [
+          { address: '0x1000', instruction: 'mov eax, [ebp+8]', instructionBytes: '8B 45 08', symbol: 'main' },
+        ],
+      }),
+    readMemory: (server, request) =>
+      server.respond(request.seq, 'readMemory', {
+        address: '0x1000',
+        unreadableBytes: 0,
+        data: 'iVBORw0KGgoAAAANSUhEUg==',
+      }),
+    completions: (server, request) =>
+      server.respond(request.seq, 'completions', {
+        targets: [
+          { label: 'myVar', type: 'variable', detail: 'int' },
+        ],
+      }),
+    terminate: (server, request) =>
+      server.respond(request.seq, 'terminate'),
+  })
+  const { manager } = buildManager(script)
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py' })
+  const session = manager.sessionFor(owner)
+
+  const restartSnap = await session.restartFrame(10)
+  assert.equal(restartSnap.status, 'stopped')
+
+  const disasm = await session.disassemble('0x1000', 5)
+  assert.equal(disasm.length, 1)
+  assert.equal(disasm[0].instruction, 'mov eax, [ebp+8]')
+  assert.equal(disasm[0].symbol, 'main')
+
+  const mem = await session.readMemory('0x1000', 16)
+  assert.equal(mem.address, '0x1000')
+  assert.equal(mem.data, 'iVBORw0KGgoAAAANSUhEUg==')
+
+  const items = await session.completions('my', 3)
+  assert.equal(items.length, 1)
+  assert.equal(items[0].label, 'myVar')
+
+  const termSnap = await session.terminate()
+  assert.equal(termSnap.status, 'terminated')
+  await manager.disposeAll()
+})

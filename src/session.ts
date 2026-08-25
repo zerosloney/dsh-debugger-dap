@@ -4,18 +4,23 @@
  * snapshot so the model always knows where the debuggee is.
  */
 
+import { isAbsolute, resolve } from 'node:path'
 import type { AdapterSpec } from './adapters.js'
 import { DapConnection, DapDisconnectedError, type SpawnedAdapter } from './connection.js'
 import { DebugLedger, type LedgerEntry, type LedgerKind, type LedgerQuery } from './ledger.js'
 import {
   readBreakpoints,
   readCapabilities,
+  readCompletions,
+  readDataBreakpointInfo,
   readDataBreakpoints,
+  readDisassembledInstructions,
   readEvaluation,
   readExceptionInfo,
   readExitCode,
   readGotoTargets,
   readLoadedSources,
+  readMemoryResult,
   readModules,
   readOutputEvent,
   readScopes,
@@ -26,11 +31,15 @@ import {
   readThreads,
   readVariables,
   type DapCapabilities,
+  type DapCompletionItem,
   type DapDataBreakpoint,
+  type DapDataBreakpointInfo,
+  type DapDisassembledInstruction,
   type DapExceptionInfo,
   type DapGotoTarget,
   type DapLoadedSource,
   type DapModule,
+  type DapReadMemoryResult,
   type DapScope,
   type DapSetResult,
   type DapSourceContent,
@@ -82,6 +91,9 @@ export interface DebugSnapshot {
     exception_info?: boolean
     step_back?: boolean
     terminate?: boolean
+    disassemble?: boolean
+    read_memory?: boolean
+    completions?: boolean
   }
 }
 
@@ -444,10 +456,11 @@ export class DebugSession {
     lines: readonly { line: number; condition?: string; hitCondition?: string; logMessage?: string }[],
     signal?: AbortSignal,
   ): Promise<BreakpointRecord[]> {
+    const resolvedPath = isAbsolute(file) ? file : resolve(this.cwdValue ?? process.cwd(), file)
     const body = await this.connection.send(
       'setBreakpoints',
       {
-        source: { path: file },
+        source: { path: resolvedPath },
         lines: lines.map(entry => entry.line),
         breakpoints: lines.map(entry => ({
           line: entry.line,
@@ -478,20 +491,31 @@ export class DebugSession {
   }
 
   async resume(
-    action: 'continue' | 'next' | 'stepIn' | 'stepOut' | 'pause',
+    action: 'continue' | 'next' | 'stepIn' | 'stepOut' | 'pause' | 'reverseContinue',
     signal?: AbortSignal,
+    options?: { threadId?: number; singleThread?: boolean },
   ): Promise<StepOutcome> {
     if (this.status === 'terminated') {
       return { state: 'terminated', timedOut: false, snapshot: this.snapshot() }
     }
+    if (action === 'reverseContinue' && this.capabilities.supportsStepBack !== true) {
+      throw new DebugError('not_supported', "The adapter does not support reverse execution ('reverseContinue').")
+    }
     await this.finishConfiguration(signal)
-    const threadId = await this.resolveThreadId(signal)
+    const threadId = options?.threadId ?? (await this.resolveThreadId(signal))
     const previousStatus = this.status
     if (action !== 'pause') this.status = 'running'
     const timeoutMs = action === 'pause' ? this.limits.requestTimeoutMs : this.limits.stepTimeoutMs
     const stopPromise = this.registerStopWaiter(timeoutMs, signal)
     try {
-      await this.connection.send(action, { threadId }, { signal })
+      await this.connection.send(
+        action,
+        {
+          threadId,
+          ...(options?.singleThread !== undefined ? { singleThread: options.singleThread } : {}),
+        },
+        { signal },
+      )
     } catch (error) {
       // The adapter refused the resume (e.g. "not stopped"): fold back to the
       // pre-request status so later snapshots keep telling the truth. A
@@ -541,7 +565,7 @@ export class DebugSession {
   }
 
   /** Step backwards (requires adapter supportsStepBack); waits for the next stop. */
-  async stepBack(signal?: AbortSignal): Promise<StepOutcome> {
+  async stepBack(signal?: AbortSignal, options?: { threadId?: number; singleThread?: boolean }): Promise<StepOutcome> {
     if (this.capabilities.supportsStepBack !== true) {
       throw new DebugError('not_supported', "The adapter does not support 'stepBack'. Upgrade the debugger or step forward instead.")
     }
@@ -549,12 +573,19 @@ export class DebugSession {
       return { state: 'terminated', timedOut: false, snapshot: this.snapshot() }
     }
     await this.finishConfiguration(signal)
-    const threadId = await this.resolveThreadId(signal)
+    const threadId = options?.threadId ?? (await this.resolveThreadId(signal))
     const previousStatus = this.status
     this.status = 'running'
     const stopPromise = this.registerStopWaiter(this.limits.stepTimeoutMs, signal)
     try {
-      await this.connection.send('stepBack', { threadId }, { signal })
+      await this.connection.send(
+        'stepBack',
+        {
+          threadId,
+          ...(options?.singleThread !== undefined ? { singleThread: options.singleThread } : {}),
+        },
+        { signal },
+      )
     } catch (error) {
       // Adapter refused the reverse step: restore the truthful stop state.
       if (this.readStatus() === 'running') this.status = previousStatus
@@ -634,7 +665,7 @@ export class DebugSession {
   async variables(
     variablesReference: number,
     signal?: AbortSignal,
-    paging?: { start?: number; count?: number },
+    paging?: { start?: number; count?: number; filter?: 'indexed' | 'named'; hex?: boolean },
   ): Promise<{ variables: DapVariable[]; omitted: number }> {
     const body = await this.connection.send(
       'variables',
@@ -642,6 +673,8 @@ export class DebugSession {
         variablesReference,
         ...(paging?.start === undefined ? {} : { start: paging.start }),
         ...(paging?.count === undefined ? {} : { count: paging.count }),
+        ...(paging?.filter === undefined ? {} : { filter: paging.filter }),
+        ...(paging?.hex === undefined ? {} : { format: { hex: paging.hex } }),
       },
       { signal },
     )
@@ -663,11 +696,17 @@ export class DebugSession {
     frameId: number | undefined,
     context: string | undefined,
     signal?: AbortSignal,
+    options?: { hex?: boolean },
   ): Promise<{ result: string; type?: string; variablesReference: number }> {
     const resolved = frameId ?? this.currentFrame?.id
     const body = await this.connection.send(
       'evaluate',
-      { expression, context: context ?? 'repl', ...(resolved === undefined ? {} : { frameId: resolved }) },
+      {
+        expression,
+        context: context ?? 'repl',
+        ...(resolved === undefined ? {} : { frameId: resolved }),
+        ...(options?.hex !== undefined ? { format: { hex: options.hex } } : {}),
+      },
       { signal },
     )
     const evaluation = readEvaluation(body)
@@ -724,9 +763,10 @@ export class DebugSession {
   async setExceptionBreakpoints(filters: readonly string[], filterOptions: unknown[] | undefined, signal?: AbortSignal): Promise<void> {
     // 配方级过滤器映射（如 debugpy 的 'all' → 'raised'）：模型侧保持标准 DAP 词汇。
     const mapped = [...filters].map(filter => this.exceptionFilterMap?.[filter] ?? filter)
-    const body: Record<string, unknown> = filterOptions !== undefined && this.capabilities.supportsExceptionOptions
-      ? { filterOptions }
-      : { filters: mapped }
+    const body: Record<string, unknown> = {
+      filters: mapped,
+      ...(filterOptions !== undefined && this.capabilities.supportsExceptionOptions ? { filterOptions } : {}),
+    }
     await this.connection.send('setExceptionBreakpoints', body, { signal })
   }
 
@@ -817,8 +857,30 @@ export class DebugSession {
     return readModules(body)
   }
 
+  async dataBreakpointInfo(
+    name: string,
+    variablesReference?: number,
+    frameId?: number,
+    signal?: AbortSignal,
+  ): Promise<DapDataBreakpointInfo> {
+    if (this.capabilities.supportsDataBreakpoints !== true) {
+      throw new DebugError('not_supported', "The adapter does not support 'dataBreakpoints'.")
+    }
+    const resolvedFrame = frameId ?? this.currentFrame?.id
+    const body = await this.connection.send(
+      'dataBreakpointInfo',
+      {
+        name,
+        ...(variablesReference !== undefined ? { variablesReference } : {}),
+        ...(resolvedFrame !== undefined ? { frameId: resolvedFrame } : {}),
+      },
+      { signal },
+    )
+    return readDataBreakpointInfo(body)
+  }
+
   async setDataBreakpoints(
-    breakpoints: readonly { address?: string; name?: string; accessType?: 'read' | 'write' | 'readWrite' }[],
+    breakpoints: readonly { dataId?: string; address?: string; name?: string; accessType?: 'read' | 'write' | 'readWrite'; condition?: string; hitCondition?: string }[],
     signal?: AbortSignal,
   ): Promise<DapDataBreakpoint[]> {
     if (this.capabilities.supportsDataBreakpoints !== true) {
@@ -828,9 +890,10 @@ export class DebugSession {
       'setDataBreakpoints',
       {
         breakpoints: breakpoints.map(bp => ({
-          ...(bp.address !== undefined ? { address: bp.address } : {}),
-          ...(bp.name !== undefined ? { name: bp.name } : {}),
+          dataId: bp.dataId ?? bp.name ?? bp.address ?? '',
           ...(bp.accessType !== undefined ? { accessType: bp.accessType } : {}),
+          ...(bp.condition !== undefined ? { condition: bp.condition } : {}),
+          ...(bp.hitCondition !== undefined ? { hitCondition: bp.hitCondition } : {}),
         })),
       },
       { signal },
@@ -840,13 +903,22 @@ export class DebugSession {
 
   async gotoTargets(targetLine: number, signal?: AbortSignal): Promise<DapGotoTarget[]> {
     const frame = this.currentFrame
-    if (frame === undefined || frame.source?.path === undefined) {
-      throw new DebugError('not_stopped', 'No current frame with a source path: stop at a breakpoint first.')
+    if (frame === undefined) {
+      throw new DebugError('not_stopped', 'No current frame: stop at a breakpoint first.')
     }
     if (this.capabilities.supportsGotoTargetsRequest !== true) {
       throw new DebugError('not_supported', "The adapter does not support 'gotoTargets'.")
     }
-    const body = await this.connection.send('gotoTargets', { source: { path: frame.source.path }, line: targetLine }, { signal })
+    const source =
+      frame.source?.path !== undefined
+        ? { path: frame.source.path }
+        : frame.source?.sourceReference !== undefined
+          ? { sourceReference: frame.source.sourceReference }
+          : undefined
+    if (source === undefined) {
+      throw new DebugError('not_stopped', 'Current frame does not carry a source location.')
+    }
+    const body = await this.connection.send('gotoTargets', { source, line: targetLine }, { signal })
     return readGotoTargets(body)
   }
 
@@ -854,13 +926,14 @@ export class DebugSession {
     if (this.capabilities.supportsGotoTargetsRequest !== true) {
       throw new DebugError('not_supported', "The adapter does not support 'goto'.")
     }
+    const threadId = await this.resolveThreadId(signal)
     const previousStatus = this.status
     const previousStopReason = this.stopReason
     this.status = 'running'
     this.stopReason = undefined
     const stopPromise = this.registerStopWaiter(this.limits.stepTimeoutMs, signal)
     try {
-      await this.connection.send('goto', { targetId }, { signal })
+      await this.connection.send('goto', { threadId, targetId }, { signal })
     } catch (error) {
       // Adapter refused the jump: restore the truthful stop state.
       if (this.readStatus() === 'running') {
@@ -877,7 +950,7 @@ export class DebugSession {
     return this.snapshot()
   }
 
-  async restartFrame(frameId: number | undefined, signal?: AbortSignal): Promise<void> {
+  async restartFrame(frameId: number | undefined, signal?: AbortSignal): Promise<DebugSnapshot> {
     if (this.capabilities.supportsRestartFrame !== true) {
       throw new DebugError('not_supported', "The adapter does not support 'restartFrame'.")
     }
@@ -885,7 +958,109 @@ export class DebugSession {
     if (resolved === undefined) {
       throw new DebugError('not_stopped', 'No current frame: stop at a breakpoint first or pass frame_id.')
     }
-    await this.connection.send('restartFrame', { frameId: resolved }, { signal })
+    const previousStatus = this.status
+    const previousStopReason = this.stopReason
+    this.status = 'running'
+    this.stopReason = undefined
+    const stopPromise = this.registerStopWaiter(this.limits.stepTimeoutMs, signal)
+    try {
+      await this.connection.send('restartFrame', { frameId: resolved }, { signal })
+    } catch (error) {
+      if (this.readStatus() === 'running') {
+        this.status = previousStatus
+        this.stopReason = previousStopReason
+      }
+      throw error
+    }
+    const state = await stopPromise
+    if (state === 'stopped') {
+      await this.refreshLocation(signal)
+      await this.evaluateWatches(signal)
+    }
+    return this.snapshot()
+  }
+
+  async disassemble(
+    memoryReference: string,
+    instructionCount: number,
+    options?: { offset?: number; instructionOffset?: number; resolveSymbols?: boolean },
+    signal?: AbortSignal,
+  ): Promise<DapDisassembledInstruction[]> {
+    if (this.capabilities.supportsDisassembleRequest !== true) {
+      throw new DebugError('not_supported', "The adapter does not support 'disassemble'.")
+    }
+    const body = await this.connection.send(
+      'disassemble',
+      {
+        memoryReference,
+        instructionCount,
+        ...(options?.offset !== undefined ? { offset: options.offset } : {}),
+        ...(options?.instructionOffset !== undefined ? { instructionOffset: options.instructionOffset } : {}),
+        ...(options?.resolveSymbols !== undefined ? { resolveSymbols: options.resolveSymbols } : {}),
+      },
+      { signal },
+    )
+    return readDisassembledInstructions(body)
+  }
+
+  async readMemory(
+    memoryReference: string,
+    count: number,
+    offset?: number,
+    signal?: AbortSignal,
+  ): Promise<DapReadMemoryResult> {
+    if (this.capabilities.supportsReadMemoryRequest !== true) {
+      throw new DebugError('not_supported', "The adapter does not support 'readMemory'.")
+    }
+    const body = await this.connection.send(
+      'readMemory',
+      {
+        memoryReference,
+        count,
+        ...(offset !== undefined ? { offset } : {}),
+      },
+      { signal },
+    )
+    return readMemoryResult(body)
+  }
+
+  async completions(
+    text: string,
+    column: number,
+    frameId?: number,
+    line?: number,
+    signal?: AbortSignal,
+  ): Promise<DapCompletionItem[]> {
+    if (this.capabilities.supportsCompletionsRequest !== true) {
+      throw new DebugError('not_supported', "The adapter does not support 'completions'.")
+    }
+    const resolved = frameId ?? this.currentFrame?.id
+    const body = await this.connection.send(
+      'completions',
+      {
+        text,
+        column,
+        ...(resolved !== undefined ? { frameId: resolved } : {}),
+        ...(line !== undefined ? { line } : {}),
+      },
+      { signal },
+    )
+    return readCompletions(body)
+  }
+
+  async terminate(restart = false, signal?: AbortSignal): Promise<DebugSnapshot> {
+    if (this.capabilities.supportsTerminateRequest !== true) {
+      await this.disconnect(true)
+      return this.snapshot()
+    }
+    try {
+      await this.connection.send('terminate', { restart }, { signal })
+    } catch {
+      // ignore
+    }
+    this.status = 'terminated'
+    this.recordLedger('session_end', { reason: 'terminate' })
+    return this.snapshot()
   }
 
   readOutput(request?: { offset?: number; maxChars?: number }): OutputPage {
@@ -948,6 +1123,9 @@ export class DebugSession {
         exception_info: this.capabilities.supportsExceptionInfoRequest,
         step_back: this.capabilities.supportsStepBack,
         terminate: this.capabilities.supportsTerminateRequest,
+        disassemble: this.capabilities.supportsDisassembleRequest,
+        read_memory: this.capabilities.supportsReadMemoryRequest,
+        completions: this.capabilities.supportsCompletionsRequest,
       },
     }
   }

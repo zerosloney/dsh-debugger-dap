@@ -6,7 +6,7 @@
 import type { AdapterSpec } from './adapters.js';
 import { DapConnection, type SpawnedAdapter } from './connection.js';
 import { DebugLedger, type LedgerEntry, type LedgerKind, type LedgerQuery } from './ledger.js';
-import { type DapCapabilities, type DapDataBreakpoint, type DapExceptionInfo, type DapGotoTarget, type DapLoadedSource, type DapModule, type DapScope, type DapSetResult, type DapSourceContent, type DapStackFrame, type DapThread, type DapVariable } from './protocol.js';
+import { type DapCapabilities, type DapCompletionItem, type DapDataBreakpoint, type DapDataBreakpointInfo, type DapDisassembledInstruction, type DapExceptionInfo, type DapGotoTarget, type DapLoadedSource, type DapModule, type DapReadMemoryResult, type DapScope, type DapSetResult, type DapSourceContent, type DapStackFrame, type DapThread, type DapVariable } from './protocol.js';
 /** Session status as folded from DAP events. */
 export type DebugStatus = 'configuring' | 'running' | 'stopped' | 'terminated';
 /** Tunables carried from plugin config into every session. */
@@ -59,6 +59,9 @@ export interface DebugSnapshot {
         exception_info?: boolean;
         step_back?: boolean;
         terminate?: boolean;
+        disassemble?: boolean;
+        read_memory?: boolean;
+        completions?: boolean;
     };
 }
 /** One breakpoint as resolved by the adapter. */
@@ -187,7 +190,10 @@ export declare class DebugSession {
         hitCondition?: string;
         logMessage?: string;
     }[], signal?: AbortSignal): Promise<BreakpointRecord[]>;
-    resume(action: 'continue' | 'next' | 'stepIn' | 'stepOut' | 'pause', signal?: AbortSignal): Promise<StepOutcome>;
+    resume(action: 'continue' | 'next' | 'stepIn' | 'stepOut' | 'pause' | 'reverseContinue', signal?: AbortSignal, options?: {
+        threadId?: number;
+        singleThread?: boolean;
+    }): Promise<StepOutcome>;
     /** Output produced since the last consumed offset (empty when nothing new). */
     private takeIncrementalOutput;
     private readStatus;
@@ -195,7 +201,10 @@ export declare class DebugSession {
     /** Switch the session's focus thread; later steps and stack_trace use it. */
     selectThread(threadId: number, signal?: AbortSignal): Promise<void>;
     /** Step backwards (requires adapter supportsStepBack); waits for the next stop. */
-    stepBack(signal?: AbortSignal): Promise<StepOutcome>;
+    stepBack(signal?: AbortSignal, options?: {
+        threadId?: number;
+        singleThread?: boolean;
+    }): Promise<StepOutcome>;
     /** Add or replace a watch expression; returns its id. */
     addWatch(expression: string): string;
     removeWatch(id: string): boolean;
@@ -212,11 +221,15 @@ export declare class DebugSession {
     variables(variablesReference: number, signal?: AbortSignal, paging?: {
         start?: number;
         count?: number;
+        filter?: 'indexed' | 'named';
+        hex?: boolean;
     }): Promise<{
         variables: DapVariable[];
         omitted: number;
     }>;
-    evaluate(expression: string, frameId: number | undefined, context: string | undefined, signal?: AbortSignal): Promise<{
+    evaluate(expression: string, frameId: number | undefined, context: string | undefined, signal?: AbortSignal, options?: {
+        hex?: boolean;
+    }): Promise<{
         result: string;
         type?: string;
         variablesReference: number;
@@ -242,14 +255,26 @@ export declare class DebugSession {
         start?: number;
         count?: number;
     }): Promise<DapModule[]>;
+    dataBreakpointInfo(name: string, variablesReference?: number, frameId?: number, signal?: AbortSignal): Promise<DapDataBreakpointInfo>;
     setDataBreakpoints(breakpoints: readonly {
+        dataId?: string;
         address?: string;
         name?: string;
         accessType?: 'read' | 'write' | 'readWrite';
+        condition?: string;
+        hitCondition?: string;
     }[], signal?: AbortSignal): Promise<DapDataBreakpoint[]>;
     gotoTargets(targetLine: number, signal?: AbortSignal): Promise<DapGotoTarget[]>;
     goto(targetId: number, signal?: AbortSignal): Promise<DebugSnapshot>;
-    restartFrame(frameId: number | undefined, signal?: AbortSignal): Promise<void>;
+    restartFrame(frameId: number | undefined, signal?: AbortSignal): Promise<DebugSnapshot>;
+    disassemble(memoryReference: string, instructionCount: number, options?: {
+        offset?: number;
+        instructionOffset?: number;
+        resolveSymbols?: boolean;
+    }, signal?: AbortSignal): Promise<DapDisassembledInstruction[]>;
+    readMemory(memoryReference: string, count: number, offset?: number, signal?: AbortSignal): Promise<DapReadMemoryResult>;
+    completions(text: string, column: number, frameId?: number, line?: number, signal?: AbortSignal): Promise<DapCompletionItem[]>;
+    terminate(restart?: boolean, signal?: AbortSignal): Promise<DebugSnapshot>;
     readOutput(request?: {
         offset?: number;
         maxChars?: number;

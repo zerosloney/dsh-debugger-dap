@@ -111,10 +111,10 @@ const BUILT_IN_RECIPES: readonly AdapterRecipe[] = [
   },
   {
     id: 'lldb-dap',
-    probeCommands: ['lldb-dap'],
+    probeCommands: ['lldb-dap', 'lldb-vscode', 'llvm-dap'],
     fixedArgs: [],
     installHint:
-      "adapter 'lldb-dap' is not available: install the LLVM DAP binary (llvm-dap, lldb-dap, or dap-server depending on your LLVM version) and ensure it is on PATH. On macOS with Xcode, you may need to build from https://llvm.org/git/dap.",
+      "adapter 'lldb-dap' is not available: install the LLVM DAP binary (lldb-dap, lldb-vscode, or llvm-dap depending on your LLVM version) and ensure it is on PATH. On macOS with Xcode, you may need to build from https://llvm.org/git/dap.",
   },
   {
     id: 'codelldb',
@@ -254,7 +254,10 @@ export function defaultCommandExists(command: string): boolean {
     }
   }
   const directories = (process.env.PATH ?? '').split(delimiter).filter(entry => entry.length > 0)
-  const extensions = process.platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : ['']
+  const extensions =
+    process.platform === 'win32'
+      ? Array.from(new Set([(process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';').map(ext => ext.toLowerCase()), ''].flat()))
+      : ['']
   for (const directory of directories) {
     for (const extension of extensions) {
       try {

@@ -6,7 +6,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { DebugSessionManager, type SessionLimits } from './session.js';
 import { type DebugToolValue } from './format.js';
-export declare const DEBUG_ACTIONS: readonly ["launch", "attach", "set_breakpoints", "set_function_breakpoints", "set_exception_breakpoints", "continue", "step_in", "step_over", "step_out", "step_back", "pause", "threads", "stack_trace", "scopes", "variables", "evaluate", "set_variable", "set_expression", "exception_info", "select_thread", "add_watch", "remove_watch", "list_watches", "output", "disconnect", "sessions", "ledger", "restart", "source", "loaded_sources", "modules", "set_data_breakpoints", "goto_targets", "goto", "restart_frame"];
+export declare const DEBUG_ACTIONS: readonly ["launch", "attach", "set_breakpoints", "set_function_breakpoints", "set_exception_breakpoints", "continue", "step_in", "step_over", "step_out", "step_back", "reverse_continue", "pause", "threads", "stack_trace", "scopes", "variables", "evaluate", "set_variable", "set_expression", "exception_info", "select_thread", "add_watch", "remove_watch", "list_watches", "output", "disconnect", "terminate", "sessions", "ledger", "restart", "source", "loaded_sources", "modules", "data_breakpoint_info", "set_data_breakpoints", "goto_targets", "goto", "restart_frame", "disassemble", "read_memory", "completions"];
 export type DebugAction = (typeof DEBUG_ACTIONS)[number];
 /**
  * Actions safe to run in parallel with other tool calls. Everything else is
@@ -69,16 +69,30 @@ export interface DebugArgs {
     target_line?: number;
     target_id?: number;
     data_breakpoints?: Array<{
+        data_id?: string;
         address?: string;
         name?: string;
         access_type?: 'read' | 'write' | 'readWrite';
+        condition?: string;
+        hit_condition?: string;
     }>;
     access_type?: 'read' | 'write' | 'readWrite';
     address?: string;
     watch_name?: string;
+    data_id?: string;
     restart_frame_id?: number;
     source_reference?: number;
     watch_id?: string;
+    single_thread?: boolean;
+    hex?: boolean;
+    filter?: 'indexed' | 'named';
+    memory_reference?: string;
+    instruction_count?: number;
+    instruction_offset?: number;
+    resolve_symbols?: boolean;
+    text?: string;
+    column?: number;
+    line?: number;
     ledger_kinds?: string;
     ledger_since?: string;
     ledger_limit?: number;

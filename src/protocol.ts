@@ -66,6 +66,9 @@ export interface DapCapabilities {
   supportsStepBack?: boolean
   supportsGotoTargetsRequest?: boolean
   supportsRestartFrame?: boolean
+  supportsDisassembleRequest?: boolean
+  supportsReadMemoryRequest?: boolean
+  supportsCompletionsRequest?: boolean
 }
 
 export function readCapabilities(body: Record<string, unknown> | undefined): DapCapabilities {
@@ -90,6 +93,9 @@ export function readCapabilities(body: Record<string, unknown> | undefined): Dap
     supportsStepBack: readBoolean(record.supportsStepBack),
     supportsGotoTargetsRequest: readBoolean(record.supportsGotoTargetsRequest),
     supportsRestartFrame: readBoolean(record.supportsRestartFrame),
+    supportsDisassembleRequest: readBoolean(record.supportsDisassembleRequest),
+    supportsReadMemoryRequest: readBoolean(record.supportsReadMemoryRequest),
+    supportsCompletionsRequest: readBoolean(record.supportsCompletionsRequest),
   }
 }
 
@@ -436,6 +442,114 @@ export function readGotoTargets(body: Record<string, unknown> | undefined): DapG
     targets.push({ id, label: readString(record.label) ?? `line ${record.line}`, line: readNumber(record.line) ?? 0 })
   }
   return targets
+}
+
+/** `disassemble` response: one disassembled instruction. */
+export interface DapDisassembledInstruction {
+  address: string
+  instructionBytes?: string
+  instruction: string
+  symbol?: string
+  location?: DapSource
+  line?: number
+  column?: number
+}
+
+export function readDisassembledInstructions(body: Record<string, unknown> | undefined): DapDisassembledInstruction[] {
+  const raw = body?.instructions
+  if (!Array.isArray(raw)) return []
+  const instructions: DapDisassembledInstruction[] = []
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    const address = readString(record.address)
+    const instruction = readString(record.instruction)
+    if (address === undefined || instruction === undefined) continue
+    instructions.push({
+      address,
+      instructionBytes: readString(record.instructionBytes),
+      instruction,
+      symbol: readString(record.symbol),
+      location: readSourceRef(record.location),
+      line: readNumber(record.line),
+      column: readNumber(record.column),
+    })
+  }
+  return instructions
+}
+
+/** `readMemory` response. */
+export interface DapReadMemoryResult {
+  address: string
+  unreadableBytes?: number
+  data?: string
+}
+
+export function readMemoryResult(body: Record<string, unknown> | undefined): DapReadMemoryResult {
+  return {
+    address: readString(body?.address) ?? '0x0',
+    unreadableBytes: readNumber(body?.unreadableBytes),
+    data: readString(body?.data),
+  }
+}
+
+/** `dataBreakpointInfo` response. */
+export interface DapDataBreakpointInfo {
+  dataId: string | null
+  description: string
+  accessTypes?: ('read' | 'write' | 'readWrite')[]
+  canPersist?: boolean
+}
+
+export function readDataBreakpointInfo(body: Record<string, unknown> | undefined): DapDataBreakpointInfo {
+  const rawAccess = body?.accessTypes
+  const accessTypes: ('read' | 'write' | 'readWrite')[] = []
+  if (Array.isArray(rawAccess)) {
+    for (const item of rawAccess) {
+      if (item === 'read' || item === 'write' || item === 'readWrite') {
+        accessTypes.push(item)
+      }
+    }
+  }
+  return {
+    dataId: readString(body?.dataId) ?? null,
+    description: readString(body?.description) ?? '',
+    accessTypes: accessTypes.length > 0 ? accessTypes : undefined,
+    canPersist: readBoolean(body?.canPersist),
+  }
+}
+
+/** `completions` response: one completion target. */
+export interface DapCompletionItem {
+  label: string
+  text?: string
+  sortText?: string
+  detail?: string
+  type?: string
+  start?: number
+  length?: number
+}
+
+export function readCompletions(body: Record<string, unknown> | undefined): DapCompletionItem[] {
+  const raw = body?.targets
+  if (!Array.isArray(raw)) return []
+  const items: DapCompletionItem[] = []
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    const label = readString(record.label)
+    if (label === undefined) continue
+    items.push({
+      label,
+      text: readString(record.text),
+      sortText: readString(record.sortText),
+      detail: readString(record.detail),
+      type: readString(record.type),
+      start: readNumber(record.start),
+      length: readNumber(record.length),
+    })
+  }
+  return items
 }
 
 // ---- Defensive primitive readers ----

@@ -162,3 +162,49 @@ test('watch, thread-focus, and reverse-step actions render their outcome', () =>
   )
   assert.ok(listFilled.includes('1 watch expression(s) shown above.'))
 })
+
+test('renders data_breakpoint_info, disassemble, read_memory, completions, and terminate', () => {
+  const dataInfo = renderDebugText({
+    action: 'data_breakpoint_info',
+    snapshot: baseSnapshot,
+    data_breakpoint_info: {
+      data_id: 'ptr_1',
+      description: 'Variable buffer',
+      access_types: ['read', 'write'],
+      can_persist: true,
+    },
+  }, 16000)
+  assert.ok(dataInfo.includes('Data breakpoint info:'))
+  assert.ok(dataInfo.includes('Variable buffer'))
+  assert.ok(dataInfo.includes('dataId="ptr_1"'))
+
+  const disasm = renderDebugText({
+    action: 'disassemble',
+    snapshot: baseSnapshot,
+    instructions: [
+      { address: '0x00401000', instruction: 'mov eax, 1', instruction_bytes: 'B8 01 00 00 00', symbol: 'main' },
+    ],
+  }, 16000)
+  assert.ok(disasm.includes('Disassembly (1 instructions):'))
+  assert.ok(disasm.includes('0x00401000'))
+  assert.ok(disasm.includes('mov eax, 1'))
+
+  const mem = renderDebugText({
+    action: 'read_memory',
+    snapshot: baseSnapshot,
+    memory: { address: '0x1000', data: 'AQIDBA==' },
+  }, 16000)
+  assert.ok(mem.includes('Memory at 0x1000:'))
+  assert.ok(mem.includes('AQIDBA=='))
+
+  const comp = renderDebugText({
+    action: 'completions',
+    snapshot: baseSnapshot,
+    completions: [{ label: 'myFunc', detail: '() -> void', type: 'function' }],
+  }, 16000)
+  assert.ok(comp.includes('Completions (1):'))
+  assert.ok(comp.includes('myFunc [function] - () -> void'))
+
+  const term = renderDebugText({ action: 'terminate', snapshot: { ...baseSnapshot, status: 'terminated' } }, 16000)
+  assert.ok(term.includes('Debuggee terminated.'))
+})

@@ -4,6 +4,28 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-08-25
+
+### Added
+
+- **New DAP Actions (41 Actions Total)**:
+  - `data_breakpoint_info`: Query data breakpoint capabilities and get `dataId` for setting watchpoints on variables/fields.
+  - `set_data_breakpoints`: Enhanced to accept `data_id`, `condition`, and `hit_condition` in addition to `address`/`name`/`access_type`.
+  - `disassemble`: Disassemble memory from a `memory_reference` with instruction bytes, symbol resolution, and source location mapping.
+  - `read_memory`: Read raw memory bytes as base64 from a `memory_reference` with offset and count.
+  - `completions`: REPL auto-completion support for expressions and symbols at a specific frame/cursor line and column.
+  - `reverse_continue`: Reverse execution continuing backward until a breakpoint or start of program.
+  - `terminate`: Graceful DAP termination request (recording `terminate` reason in ledger).
+- **Inspection Enhancements**:
+  - `variables` and `evaluate` actions now support `hex: true` formatting for hex number representations.
+  - `variables` action supports `filter: 'indexed' | 'named'` for filtering arrays vs object fields.
+  - `goto_targets` now supports in-memory sources (`sourceReference`) in addition to file paths.
+  - `restart_frame` now returns an updated `DebugSnapshot` with refreshed frame, thread, and watch evaluations.
+- **Recipe & Transport Compatibility**:
+  - `lldb-dap` recipe now automatically probes `lldb-dap`, `lldb-vscode`, and `llvm-dap` across different LLVM toolchains.
+  - Windows `PATHEXT` handling in `defaultCommandExists` correctly parses case-insensitive executable extensions.
+  - `spawnAdapter` defaults options to `{}` avoiding `TypeError` on optional parameter omission.
+
 ## [0.1.6] - 2026-08-24
 
 ### Added

@@ -69,6 +69,10 @@ export interface DebugToolValue {
   sources?: Array<{ path?: string; name?: string; source_reference?: number }>
   modules?: Array<{ id: string; name?: string; path?: string; version?: string; loaded?: boolean }>
   targets?: Array<{ id: number; label: string; line: number }>
+  data_breakpoint_info?: { data_id: string | null; description: string; access_types?: string[]; can_persist?: boolean }
+  instructions?: Array<{ address: string; instruction: string; instruction_bytes?: string; symbol?: string; location?: { path?: string; name?: string }; line?: number; column?: number }>
+  memory?: { address: string; unreadable_bytes?: number; data?: string }
+  completions?: Array<{ label: string; text?: string; sort_text?: string; detail?: string; type?: string; start?: number; length?: number }>
   /** Ledger rows (action 'ledger'). */
   entries?: Array<{ seq: number; ts: string; sessionId?: string; kind: string; detail: Record<string, unknown> }>
   truncated?: boolean
@@ -265,8 +269,13 @@ export function renderDebugText(value: DebugToolValue, maxResultChars: number, s
     case 'step_over':
     case 'step_out':
     case 'step_back':
+    case 'reverse_continue':
     case 'pause':
       sections = formatOutcome(value, stepTimeoutMs)
+      break
+    case 'terminate':
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      sections.push('Debuggee terminated.')
       break
     case 'select_thread': {
       sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
@@ -356,6 +365,16 @@ export function renderDebugText(value: DebugToolValue, maxResultChars: number, s
       }
       break
     }
+    case 'data_breakpoint_info': {
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      const info = value.data_breakpoint_info
+      if (info?.data_id !== null && info?.data_id !== undefined) {
+        sections.push(`Data breakpoint info: dataId="${info.data_id}" (${info.description})${info.access_types ? ` access: [${info.access_types.join(', ')}]` : ''}`)
+      } else {
+        sections.push(`Data breakpoint not available: ${info?.description ?? 'variable cannot be watched'}`)
+      }
+      break
+    }
     case 'set_data_breakpoints':
       sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
       sections.push(...formatBreakpoints('data', value.breakpoints ?? []))
@@ -378,6 +397,38 @@ export function renderDebugText(value: DebugToolValue, maxResultChars: number, s
       sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
       sections.push('Current stack frame restarted (function re-entered).')
       break
+    case 'disassemble': {
+      const instructions = value.instructions ?? []
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      sections.push(`Disassembly (${instructions.length} instructions):`)
+      if (instructions.length === 0) sections.push('(none)')
+      for (const inst of instructions) {
+        const sym = inst.symbol !== undefined ? ` <${inst.symbol}>` : ''
+        const loc = inst.location?.path !== undefined ? ` [${inst.location.path}:${inst.line ?? '?'}]` : ''
+        const bytes = inst.instruction_bytes !== undefined ? `  ${inst.instruction_bytes.padEnd(16)}` : ''
+        sections.push(`  ${inst.address}${sym}:${bytes} ${inst.instruction}${loc}`)
+      }
+      break
+    }
+    case 'read_memory': {
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      const mem = value.memory
+      sections.push(`Memory at ${mem?.address ?? '0x0'}${mem?.unreadable_bytes !== undefined ? ` (${mem.unreadable_bytes} unreadable bytes)` : ''}:`)
+      sections.push(mem?.data !== undefined ? `Data (base64): ${mem.data}` : '(no data)')
+      break
+    }
+    case 'completions': {
+      const items = value.completions ?? []
+      sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
+      sections.push(`Completions (${items.length}):`)
+      if (items.length === 0) sections.push('(none)')
+      for (const item of items) {
+        const detail = item.detail !== undefined ? ` - ${item.detail}` : ''
+        const type = item.type !== undefined ? ` [${item.type}]` : ''
+        sections.push(`- ${item.label}${type}${detail}`)
+      }
+      break
+    }
     case 'output':
       sections = formatOutput({
         text: value.output?.text ?? '',

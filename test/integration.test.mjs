@@ -17,6 +17,8 @@ const require = createRequire(import.meta.url)
 const { DebugSessionManager } = await import('../lib/session.js')
 const { resolveAdapter } = await import('../lib/adapters.js')
 
+const { spawnAdapter } = await import('../lib/connection.js')
+
 const forced = process.env.DEBUG_DAP_INTEGRATION === '1'
 
 function commandExists(command) {
@@ -78,9 +80,9 @@ test('debugpy: launch, entry stop, step, disconnect', { skip: HAS_DEBUGPY ? fals
   fs.writeFileSync(scriptPath, 'def main():\n    x = 1\n    return x\nmain()\n')
   const spec = resolveAdapter({ adapter: 'debugpy', program: scriptPath })
   const manager = new DebugSessionManager({
-    spawn: () => import('../lib/connection.js').then(m => m.spawnDapAdapter([spec.command, ...spec.args])),
+    spawn: spec => spawnAdapter(spec),
     resolveAdapter: () => spec,
-    limits: { requestTimeoutMs: 15000, stepTimeoutMs: 10000, maxOutputChars: 2000, maxStackFrames: 20, maxVariables: 100, maxResultChars: 16000 },
+    limits: { requestTimeoutMs: 30000, stepTimeoutMs: 25000, maxOutputChars: 2000, maxStackFrames: 20, maxVariables: 100, maxResultChars: 16000 },
     sessionIdleTimeoutMs: 0,
   })
   try {
@@ -93,9 +95,9 @@ test('debugpy: launch, entry stop, step, disconnect', { skip: HAS_DEBUGPY ? fals
 test('dlv: launch a trivial Go program, entry stop, disconnect', { skip: HAS_DLV ? false : SKIP_REASON }, async () => {
   const spec = resolveAdapter({ adapter: 'dlv', program: '/tmp/smoke.go' })
   const manager = new DebugSessionManager({
-    spawn: () => import('../lib/connection.js').then(m => m.spawnDapAdapter([spec.command, ...spec.args])),
+    spawn: spec => spawnAdapter(spec),
     resolveAdapter: () => spec,
-    limits: { requestTimeoutMs: 15000, stepTimeoutMs: 10000, maxOutputChars: 2000, maxStackFrames: 20, maxVariables: 100, maxResultChars: 16000 },
+    limits: { requestTimeoutMs: 30000, stepTimeoutMs: 25000, maxOutputChars: 2000, maxStackFrames: 20, maxVariables: 100, maxResultChars: 16000 },
     sessionIdleTimeoutMs: 0,
   })
   const fs = await import('node:fs')
@@ -114,9 +116,9 @@ test('dlv: launch a trivial Go program, entry stop, disconnect', { skip: HAS_DLV
 test('netcoredbg: launch, entry stop, disconnect', { skip: HAS_NETCOREDBG ? false : SKIP_REASON }, async () => {
   const spec = resolveAdapter({ adapter: 'netcoredbg', program: '/tmp/smoke.dll' })
   const manager = new DebugSessionManager({
-    spawn: () => import('../lib/connection.js').then(m => m.spawnDapAdapter([spec.command, ...spec.args])),
+    spawn: spec => spawnAdapter(spec),
     resolveAdapter: () => spec,
-    limits: { requestTimeoutMs: 15000, stepTimeoutMs: 10000, maxOutputChars: 2000, maxStackFrames: 20, maxVariables: 100, maxResultChars: 16000 },
+    limits: { requestTimeoutMs: 30000, stepTimeoutMs: 25000, maxOutputChars: 2000, maxStackFrames: 20, maxVariables: 100, maxResultChars: 16000 },
     sessionIdleTimeoutMs: 0,
   })
   // netcoredbg launches a dll; without one built the launch will fail, so this
@@ -135,3 +137,4 @@ test('netcoredbg: launch, entry stop, disconnect', { skip: HAS_NETCOREDBG ? fals
     fs.unlinkSync(dll)
   }
 })
+

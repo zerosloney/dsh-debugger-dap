@@ -50,6 +50,9 @@ export interface DapCapabilities {
     supportsStepBack?: boolean;
     supportsGotoTargetsRequest?: boolean;
     supportsRestartFrame?: boolean;
+    supportsDisassembleRequest?: boolean;
+    supportsReadMemoryRequest?: boolean;
+    supportsCompletionsRequest?: boolean;
 }
 export declare function readCapabilities(body: Record<string, unknown> | undefined): DapCapabilities;
 /** `stopped` event body. */
@@ -170,6 +173,43 @@ export interface DapGotoTarget {
     line: number;
 }
 export declare function readGotoTargets(body: Record<string, unknown> | undefined): DapGotoTarget[];
+/** `disassemble` response: one disassembled instruction. */
+export interface DapDisassembledInstruction {
+    address: string;
+    instructionBytes?: string;
+    instruction: string;
+    symbol?: string;
+    location?: DapSource;
+    line?: number;
+    column?: number;
+}
+export declare function readDisassembledInstructions(body: Record<string, unknown> | undefined): DapDisassembledInstruction[];
+/** `readMemory` response. */
+export interface DapReadMemoryResult {
+    address: string;
+    unreadableBytes?: number;
+    data?: string;
+}
+export declare function readMemoryResult(body: Record<string, unknown> | undefined): DapReadMemoryResult;
+/** `dataBreakpointInfo` response. */
+export interface DapDataBreakpointInfo {
+    dataId: string | null;
+    description: string;
+    accessTypes?: ('read' | 'write' | 'readWrite')[];
+    canPersist?: boolean;
+}
+export declare function readDataBreakpointInfo(body: Record<string, unknown> | undefined): DapDataBreakpointInfo;
+/** `completions` response: one completion target. */
+export interface DapCompletionItem {
+    label: string;
+    text?: string;
+    sortText?: string;
+    detail?: string;
+    type?: string;
+    start?: number;
+    length?: number;
+}
+export declare function readCompletions(body: Record<string, unknown> | undefined): DapCompletionItem[];
 export declare function readString(value: unknown): string | undefined;
 export declare function readNumber(value: unknown): number | undefined;
 export declare function readBoolean(value: unknown): boolean | undefined;

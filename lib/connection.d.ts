@@ -91,7 +91,7 @@ import type { AdapterSpec } from './adapters.js';
  * Returns a promise for TCP transports (needed for async socket connection)
  * and a plain value for stdio transports.
  */
-export declare function spawnAdapter(spec: Pick<AdapterSpec, 'command' | 'args' | 'env' | 'cwd' | 'transport' | 'host' | 'port' | 'portPattern' | 'announceStream'>, options: {
+export declare function spawnAdapter(spec: Pick<AdapterSpec, 'command' | 'args' | 'env' | 'cwd' | 'transport' | 'host' | 'port' | 'portPattern' | 'announceStream'>, options?: {
     requestTimeoutMs?: number;
     maxBodyBytes?: number;
     signal?: AbortSignal;

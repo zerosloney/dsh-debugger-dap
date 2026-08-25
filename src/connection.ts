@@ -277,23 +277,6 @@ function spawnChildProcess(
   let exitWaiter: Promise<void> | undefined
   const kill = async (): Promise<void> => {
     if (child.exitCode !== null || child.signalCode !== null) return
-    if (detached) {
-      // Terminate the whole process group; individual fallback if the group
-      // signal cannot be delivered (e.g. the child already reaped).
-      try {
-        process.kill(-child.pid!, 'SIGTERM')
-      } catch {
-        try {
-          child.kill()
-        } catch {
-          // already gone
-        }
-      }
-    } else if (process.platform === 'win32') {
-      await taskkillTree(child)
-    } else {
-      child.kill()
-    }
     if (exitWaiter === undefined) {
       exitWaiter = new Promise<void>(resolve => {
         let settled = false
@@ -323,7 +306,27 @@ function spawnChildProcess(
           setTimeout(done, 500)
         }, KILL_GRACE_MS)
         child.once('exit', done)
+        if (child.exitCode !== null || child.signalCode !== null) {
+          done()
+        }
       })
+    }
+    if (detached) {
+      // Terminate the whole process group; individual fallback if the group
+      // signal cannot be delivered (e.g. the child already reaped).
+      try {
+        process.kill(-child.pid!, 'SIGTERM')
+      } catch {
+        try {
+          child.kill()
+        } catch {
+          // already gone
+        }
+      }
+    } else if (process.platform === 'win32') {
+      await taskkillTree(child)
+    } else {
+      child.kill()
     }
     await exitWaiter
   }
@@ -371,7 +374,7 @@ export function spawnAdapter(
     requestTimeoutMs?: number
     maxBodyBytes?: number
     signal?: AbortSignal
-  },
+  } = {},
 ): SpawnedAdapter | Promise<SpawnedAdapter> {
   if (spec.transport === 'tcp') {
     if (spec.port !== undefined && spec.port > 0) {
