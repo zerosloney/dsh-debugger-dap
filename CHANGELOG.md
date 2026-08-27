@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **发布改为本机执行**：删除发布相关 GitHub Actions（`publish.yml`、`real-adapters.yml`；
+  `ci.yml` 保留，push/PR 仍自动跑 lint + test），新增 npm scripts——`npm run check`
+  （lint + typecheck + test，本地等价物）、`npm run test:real`（真实适配器 integration + smoke，
+  原 real-adapters 工作流的本地对应）、`npm run pack:preview`（`npm pack --dry-run` 预览发布内容）与
+  `npm run release`（`scripts/release.mjs`：递增版本并同步 `package-lock.json` → 检查 →
+  `npm publish` → 本地提交 + 打 tag `vX.Y.Z`，支持 `--dry-run`/`--push`/`--allow-dirty`）。
+
 ## [0.1.8] - 2026-08-25
 
 ### Added
@@ -46,7 +57,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **TCP 端口发现支持 stderr 播报**：`spawnTcpAdapterWithDiscovery` 默认同时扫描子进程 stdout 与 stderr（新增 `announceStream: 'stdout' | 'stderr' | 'both'`，贯通 `adapters.<id>.announceStream` 配置），覆盖 `node --inspect` 等把 "Debugger listening on ws://…" 写到 stderr 的调试器。
-- **CI real-adapters 工作流**（`.github/workflows/real-adapters.yml`）：ubuntu 上安装 debugpy（pip）、dlv（go install）、netcoredbg（release tarball），以 `DEBUG_DAP_INTEGRATION=1` 真实跑 integration + smoke，防止内置配方与真实适配器漂移。
+- **真实适配器测试入口**：本机 `npm run test:real`（原 `.github/workflows/real-adapters.yml` 对应，该工作流已删除）安装 debugpy（pip）、dlv（go install）、netcoredbg（release tarball）后，以 `DEBUG_DAP_INTEGRATION=1` 真实跑 integration + smoke，防止内置配方与真实适配器漂移。
 - **真实 netcoredbg 冒烟脚本**（`scripts/selftest-netcoredbg.mjs`）：dotnet build 真实 dll 后跑通 launch/step/stack/evaluate/disconnect 闭环。
 - **工具层全链路实测脚本**（`scripts/selftest-netcoredbg-tool.mjs`）：模型真实路径（动作分发 + 文本渲染 + 错误归一化）对真实 netcoredbg 跑 12 项断言，验证断点命中/变量/求值/写值/台账/断连；记录 pending 断点、variablesReference 单停机有效、循环断点多次命中三个真实适配器行为。
 - **会话台账（ledger）**：每次调试会话的关键事件（`session_start`/`breakpoints_set`/`breakpoint_hit`/`exception`/`stop`/`session_end`/`request_error`）追加写入 JSONL（默认 `~/.dsh-debugger-dap/ledger.jsonl`，`ledgerPath`/`ledgerMaxBytes` 可配，超限轮转到 `.1`）；新增 `ledger` 动作（`session_id`/`ledger_kinds`/`ledger_since`/`ledger_limit` 过滤）。断点/异常命中尽力补全顶层帧位置（file/line/function）。

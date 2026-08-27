@@ -71,7 +71,7 @@ DAP 交互式调试器，作为 [DeepSeek Harness](https://www.npmjs.com/package
 
 ## 安装与挂载
 
-插件已发布到 npm registry（`dsh-debugger-dap`，随 `v*` tag 由 CI 自动发布）。在 DeepSeek Harness 中通过 npm 包路径安装——`dsh plugin add` 会安装依赖并自动把包名追加到 profile 的 `dsh.profile.bundles`：
+插件已发布到 npm registry（`dsh-debugger-dap`，本机执行 `npm run release` 发布，见[本机发布](#本机发布)）。在 DeepSeek Harness 中通过 npm 包路径安装——`dsh plugin add` 会安装依赖并自动把包名追加到 profile 的 `dsh.profile.bundles`：
 
 ```sh
 dsh plugin init debugger                       # 或跳过：add 时会自动创建 profile
@@ -149,11 +149,36 @@ debug launch adapter=netcoredbg program=<构建出的>.dll cwd=<项目目录>
 ## 测试
 
 ```sh
-npm test   # 构建 + node --test：framing、DAP 握手、状态机、owner 作用域、工具层全流程、适配器解析
-npm run lint   # oxlint：src/test/helpers
+npm test          # 构建 + node --test：framing、DAP 握手、状态机、owner 作用域、工具层全流程、适配器解析
+npm run lint      # oxlint：src/test/helpers
+npm run check     # lint + typecheck + test（与 ci.yml 相同的本机检查，发布前必跑）
+npm run test:real # 真实适配器集成测试（debugpy/dlv/netcoredbg，未安装则自动跳过；
+                  # 设 DEBUG_DAP_INTEGRATION=1 可强制全部跑）
 ```
 
-测试通过内存中的伪 DAP 适配器（真实线协议帧格式）驱动，不需要安装任何真实调试器。
+单元测试通过内存中的伪 DAP 适配器（真实线协议帧格式）驱动，不需要安装任何真实调试器；
+`npm run test:real`（原 `.github/workflows/real-adapters.yml` 的本地对应）会真的拉起
+debugpy/dlv/netcoredbg 跑 integration + smoke，防止内置配方与真实适配器漂移（需先
+`pip install debugpy`、`go install github.com/go-delve/delve/cmd/dlv@latest`、
+下载 netcoredbg 加入 PATH，详见 [USAGE.md](./USAGE.md)）。
+
+## 本机发布
+
+发布不依赖 CI，全部在本机完成。`npm run release` 是原 `publish.yml` 的本地等价物——
+递增版本（`package.json` 与 `package-lock.json` 同步）→ lint/typecheck/test → `npm publish`
+→ 提交 + 打 tag `vX.Y.Z`：
+
+```sh
+npm run release             # patch 递增（缺省）
+npm run release minor       # minor 递增（当前为预发布版本时顺带升级为稳定版）
+npm run release 0.2.0-rc.1  # 显式版本号
+npm run release -- --dry-run  # 发布演练：只跑检查与 npm pack --dry-run，不改任何文件
+npm run release -- --push     # 打 tag 后一并推送远端分支与 tag
+npm run release -- --allow-dirty  # 允许带未提交改动发布（缺省拒绝）
+```
+
+发布前可用 `npm run pack:preview`（`npm pack --dry-run`）单独预览 tarball 内容——受
+`files` 字段约束，仅含 `lib/`、`cordis.patch.yml`、`README.md`、`USAGE.md`。
 
 ## 已知限制
 

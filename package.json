@@ -35,7 +35,11 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "oxlint src test helpers",
-    "test": "npm run build && node --test"
+    "test": "npm run build && node --test",
+    "check": "npm run lint && npm run typecheck && npm test",
+    "test:real": "node --test test/integration.test.mjs test/smoke.test.mjs",
+    "pack:preview": "npm pack --dry-run",
+    "release": "node scripts/release.mjs"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1-rc.1"
