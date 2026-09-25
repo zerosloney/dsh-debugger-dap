@@ -1,12 +1,12 @@
 /**
  * The model-facing `debug` tool: one tool, one discriminating `action`
- * parameter, twenty-nine actions covering launch, breakpoints, stepping,
- * inspection, runtime mutation, output capture, and teardown.
+ * parameter covering launch, breakpoints, stepping, inspection, runtime
+ * mutation, output capture, and teardown.
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { DebugSessionManager, type SessionLimits } from './session.js';
 import { type DebugToolValue } from './format.js';
-export declare const DEBUG_ACTIONS: readonly ["launch", "attach", "set_breakpoints", "set_function_breakpoints", "set_exception_breakpoints", "continue", "step_in", "step_over", "step_out", "step_back", "reverse_continue", "pause", "threads", "stack_trace", "scopes", "variables", "evaluate", "set_variable", "set_expression", "exception_info", "select_thread", "add_watch", "remove_watch", "list_watches", "output", "disconnect", "terminate", "sessions", "ledger", "restart", "source", "loaded_sources", "modules", "data_breakpoint_info", "set_data_breakpoints", "goto_targets", "goto", "restart_frame", "disassemble", "read_memory", "completions"];
+export declare const DEBUG_ACTIONS: readonly ["launch", "attach", "install_adapter", "set_breakpoints", "set_function_breakpoints", "set_exception_breakpoints", "continue", "step_in", "step_over", "step_out", "step_back", "reverse_continue", "pause", "threads", "stack_trace", "scopes", "variables", "evaluate", "set_variable", "set_expression", "exception_info", "select_thread", "add_watch", "remove_watch", "list_watches", "output", "disconnect", "terminate", "sessions", "ledger", "restart", "source", "loaded_sources", "modules", "data_breakpoint_info", "set_data_breakpoints", "goto_targets", "goto", "restart_frame", "disassemble", "read_memory", "completions"];
 export type DebugAction = (typeof DEBUG_ACTIONS)[number];
 /**
  * Actions safe to run in parallel with other tool calls. Everything else is

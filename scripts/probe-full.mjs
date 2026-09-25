@@ -1,4 +1,4 @@
-// 全链路探针：manager + debugpy 真实会话，逐步打日志，定位挂起点。
+// Full-chain probe: manager + real debugpy session with step-by-step logging to locate hangs.
 import { DebugSessionManager } from '../lib/session.js'
 import { spawnAdapter } from '../lib/connection.js'
 import { resolveAdapter } from '../lib/adapters.js'

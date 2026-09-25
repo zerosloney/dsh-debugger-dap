@@ -10,7 +10,12 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { AdapterUnavailableError, resolveAdapter, type AdapterConfigEntry } from './adapters.js'
+import {
+  AdapterUnavailableError,
+  createAutoInstallingResolver,
+  resolveAdapter,
+  type AdapterConfigEntry,
+} from './adapters.js'
 import { spawnAdapter } from './connection.js'
 import { DebugLedger } from './ledger.js'
 import { DebugSessionManager, type SessionLimits } from './session.js'
@@ -33,6 +38,8 @@ export interface Config {
   adapters: Record<string, AdapterConfigEntry>
   ledgerPath: string
   ledgerMaxBytes: number
+  autoInstallAdapters: boolean
+  installTimeoutMs: number
 }
 
 export const Config = z.object({
@@ -44,6 +51,17 @@ export const Config = z.object({
   maxResultChars: z.natural().min(2000).default(16000).description('Model-facing text result cap in characters.'),
   sessionIdleTimeoutMs: z.natural().default(30 * 60 * 1000).description('Idle time after which a session is auto-disconnected; 0 disables reaping.'),
   maxSessionsPerOwner: z.natural().default(5).description('Maximum live sessions per agent; beyond this the oldest idle session is evicted.'),
+  autoInstallAdapters: z
+    .boolean()
+    .default(false)
+    .description(
+      "When launch/attach cannot resolve an adapter, try installing it once before failing: debugpy via pip, dlv via go install (Go toolchain required), netcoredbg from GitHub releases. Installed binaries land in ~/.dsh-debugger-dap/adapters and are probed automatically. The install_adapter action works regardless of this switch.",
+    ),
+  installTimeoutMs: z
+    .natural()
+    .min(10_000)
+    .default(600_000)
+    .description('Timeout for adapter install steps (pip / go install / release download) in milliseconds.'),
   ledgerPath: z
     .string()
     .default('')
@@ -63,6 +81,8 @@ export const Config = z.object({
         env: z.dict(z.string()),
         cwd: z.string(),
         launchArgs: z.any(),
+        /** `launch` field that carries the stop-on-entry control (default 'stopOnEntry'; e.g. netcoredbg needs 'stopAtEntry'). */
+        stopOnEntryKey: z.string(),
         /** Transport layer: 'stdio' (default) or 'tcp'. */
         transport: z.union([z.const('stdio'), z.const('tcp')]).default('stdio'),
         /** TCP connect host (default '127.0.0.1'). Used when transport is 'tcp'. */
@@ -91,10 +111,16 @@ export function apply(ctx: Context, config: Config): void {
     maxStackFrames: config.maxStackFrames,
     maxVariables: config.maxVariables,
     maxResultChars: config.maxResultChars,
+    installTimeoutMs: config.installTimeoutMs,
   }
   const manager = new DebugSessionManager({
     spawn: spec => spawnAdapter(spec, { requestTimeoutMs: config.requestTimeoutMs }),
-    resolveAdapter: options => resolveAdapter(options, config.adapters),
+    resolveAdapter: config.autoInstallAdapters
+      ? createAutoInstallingResolver(config.adapters, {
+          autoInstall: true,
+          installTimeoutMs: config.installTimeoutMs,
+        })
+      : options => resolveAdapter(options, config.adapters),
     limits,
     sessionIdleTimeoutMs: config.sessionIdleTimeoutMs,
     maxSessionsPerOwner: config.maxSessionsPerOwner,

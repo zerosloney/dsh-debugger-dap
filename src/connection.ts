@@ -1,7 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { connect as netConnect, type Socket as NetSocket } from 'node:net'
+import { delimiter } from 'node:path'
 import { encodeMessage, FramingError, MessageDecoder } from './framing.js'
 import { classifyDapMessage, type DapResponse } from './protocol.js'
+import { managedBinDirs } from './install.js'
 /** Byte-stream abstraction over the adapter's stdio (or a test double). */
 export interface DapTransport {
   /** Queue one framed write; must not throw after close. */
@@ -59,8 +61,6 @@ export class DapConnection {
   private readonly requestTimeoutMs: number
   private closed = false
   private closeReason: string | undefined
-  private lastResponseAt = Date.now()
-  private stalled = false
 
   constructor(
     private readonly transport: DapTransport,
@@ -76,11 +76,6 @@ export class DapConnection {
   /** Whether the adapter connection has closed; further sends reject. */
   get isClosed(): boolean {
     return this.closed
-  }
-
-  /** Whether the adapter stopped responding entirely (likely hung). */
-  get isStalled(): boolean {
-    return this.stalled
   }
 
   /**
@@ -105,10 +100,6 @@ export class DapConnection {
           detachAbort(pending)
           const error = new Error(`DAP ${command} timed out after ${timeoutMs}ms`)
           error.name = 'TimeoutError'
-          // A timed-out request with no response traffic at all (and a live
-          // connection) suggests a hung adapter: flag it so the caller can
-          // advise disconnecting instead of retrying.
-          if (!this.closed && Date.now() - this.lastResponseAt >= timeoutMs) this.stalled = true
           reject(error)
         }, timeoutMs)
       }
@@ -179,7 +170,6 @@ export class DapConnection {
   }
 
   private settle(response: DapResponse): void {
-    this.lastResponseAt = Date.now()
     const seq = response.request_seq
     if (seq === undefined) return
     const pending = this.pending.get(seq)
@@ -263,9 +253,19 @@ function spawnChildProcess(
   // kills the debuggee tree it spawned. Windows has no process groups; tree
   // kill goes through `taskkill /T` instead.
   const detached = process.platform !== 'win32'
+  // Adapters installed into the managed dir are spawned by bare name, so
+  // those directories must lead the child's PATH (they are probed the same
+  // way at resolve time).
+  const extraDirs = managedBinDirs()
+  let env: NodeJS.ProcessEnv = options.env === undefined ? { ...process.env } : { ...process.env, ...options.env }
+  if (extraDirs.length > 0) {
+    const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+    const current = typeof env[pathKey] === 'string' ? (env[pathKey] as string) : ''
+    env = { ...env, [pathKey]: `${extraDirs.join(delimiter)}${current.length > 0 ? delimiter + current : ''}` }
+  }
   const child: ChildProcess = spawn(command, args, {
     cwd: options.cwd,
-    env: options.env === undefined ? process.env : { ...process.env, ...options.env },
+    env,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
     detached,
@@ -419,6 +419,10 @@ export function childProcessTransport(child: ChildProcess): DapTransport {
   const errorListeners = new Set<(error: Error) => void>()
   const closeListeners = new Set<() => void>()
   let closed = false
+  // A write that races the child's death surfaces as EPIPE /
+  // ERR_STREAM_DESTROYED here; the 'close' handler folds the session, so
+  // these must never become uncaught exceptions.
+  child.stdin?.on('error', () => {})
   child.stdout?.on('data', (chunk: Buffer) => {
     for (const listener of Array.from(dataListeners)) listener(chunk)
   })
@@ -600,6 +604,9 @@ export function spawnTcpAdapterWithPort(
 ): Promise<SpawnedAdapter> {
   return new Promise<SpawnedAdapter>((resolve, reject) => {
     const { child, stderrTail, kill } = spawnChildProcess(argv, options)
+    // Keep the child's stdout drained on this path (no DAP frames travel on
+    // it): a chatty adapter would otherwise fill the pipe buffer and block.
+    child.stdout?.on('data', () => {})
     const host = options.host ?? '127.0.0.1'
     const port = options.port
     const connectTimeoutMs = options.connectTimeoutMs ?? options.requestTimeoutMs ?? 30_000
@@ -674,7 +681,7 @@ export interface TcpDiscoveryOptions {
   requestTimeoutMs?: number
   maxBodyBytes?: number
   signal?: AbortSignal
-  /** Regex (string or RegExp) matching the adapter's port announcement, with one capture group for the port. Default: /Listening on port (\d+)/. */
+  /** Regex (string or RegExp) matching the adapter's port announcement: the last capture group is the port; with two groups the first is the announced host. Default: /Listening on port (\d+)/. */
   portPattern?: string | RegExp
   /** Which child stream(s) carry the port announcement (default `'both'`; `'stdout'` pins the old behavior). */
   announceStream?: 'stdout' | 'stderr' | 'both'
@@ -751,16 +758,16 @@ export function spawnTcpAdapterWithDiscovery(
      * is bound, so the first attempt can hit ECONNREFUSED. Child death
      * settles via the exit handler; the deadline is the backstop.
      */
-    function tryConnect(port: number, deadline: number): void {
+    function tryConnect(port: number, connectHost: string, deadline: number): void {
       if (settled) return
-      const socket = netConnect(port, host)
+      const socket = netConnect(port, connectHost)
       socket.once('connect', () => {
         if (settled) {
           socket.destroy()
           return
         }
         finish()
-        const transport = tcpTransport(socket, { host, port })
+        const transport = tcpTransport(socket, { host: connectHost, port })
         const connection = new DapConnection(transport, {
           requestTimeoutMs: options.requestTimeoutMs,
           maxBodyBytes: options.maxBodyBytes,
@@ -779,9 +786,9 @@ export function spawnTcpAdapterWithDiscovery(
         socket.destroy()
         if (settled) return
         if (Date.now() >= deadline) {
-          fail(new Error(`Timed out connecting to ${host}:${port} after the adapter announced its port.${stderrDetail()}`))
+          fail(new Error(`Timed out connecting to ${connectHost}:${port} after the adapter announced its port.${stderrDetail()}`))
         } else {
-          setTimeout(() => tryConnect(port, deadline), 50)
+          setTimeout(() => tryConnect(port, connectHost, deadline), 50)
         }
       })
     }
@@ -796,14 +803,22 @@ export function spawnTcpAdapterWithDiscovery(
       // may bound the retries from here on, or a late discovery timer could
       // kill the adapter while the bind is still completing.
       clearTimeout(discoveryTimer)
-      const port = Number(match[1])
+      // The last capture group is the port; with two groups the first is
+      // the announced host (e.g. js-debug prints "Debug server listening
+      // at ::1:8123" and binds IPv6-only, so connecting to the default
+      // 127.0.0.1 would never land).
+      const groups = match.slice(1)
+      const port = Number(groups[groups.length - 1])
+      const hostGroup = groups.length >= 2 ? groups[groups.length - 2] : undefined
+      const matchHost = typeof hostGroup === 'string' && hostGroup.length > 0 ? hostGroup : undefined
+      const connectHost = options.host ?? matchHost ?? host
       // Announcement received: swap the discovery window for the connect
       // window, so a slow bind is bounded by its own deadline.
       const windowMs = options.connectTimeoutMs ?? options.requestTimeoutMs ?? 30_000
       connectBackstop = setTimeout(() => {
-        fail(new Error(`Timed out connecting to ${host}:${port} after the adapter announced its port.${stderrDetail()}`))
+        fail(new Error(`Timed out connecting to ${connectHost}:${port} after the adapter announced its port.${stderrDetail()}`))
       }, windowMs)
-      tryConnect(port, Date.now() + windowMs)
+      tryConnect(port, connectHost, Date.now() + windowMs)
     }
     child.stdout?.on('data', onAnnounceChunk)
     // Some adapters announce the port on stderr (e.g. `node --inspect`

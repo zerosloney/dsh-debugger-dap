@@ -36,6 +36,9 @@ export interface DebugToolValue {
     snapshot?: DebugSnapshot;
     state?: 'stopped' | 'running' | 'terminated';
     timed_out?: boolean;
+    adapter?: string;
+    already_installed?: boolean;
+    command?: string;
     file?: string;
     breakpoints?: Array<{
         id: string;

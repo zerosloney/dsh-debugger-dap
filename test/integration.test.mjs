@@ -65,7 +65,8 @@ async function smokeLaunch(manager, options) {
     const outcome = await session.resume('stepIn')
     assert.ok(['stopped', 'running', 'terminated'].includes(outcome.state))
   } finally {
-    // 断言失败也必须清理适配器进程，否则 node --test 因残留子进程挂起。
+    // Adapter processes must be cleaned up even on assertion failure, or
+    // node --test hangs waiting on leftover children.
     await manager.disposeAll()
   }
 }
@@ -74,8 +75,9 @@ test('debugpy: launch, entry stop, step, disconnect', { skip: HAS_DEBUGPY ? fals
   const fs = await import('node:fs')
   const os = await import('node:os')
   const path = await import('node:path')
-  // 先写真实脚本，再按真实路径解析配方（既有缺陷：/tmp/smoke.py 不存在，
-  // 且 spec 在文件写入前解析，2026-08-24 修复）。
+  // Write the real script first, then resolve the recipe against its real
+  // path (pre-existing flaw fixed 2026-08-24: /tmp/smoke.py did not exist,
+  // and the spec was resolved before the file was written).
   const scriptPath = path.join(os.tmpdir(), `dsh-smoke-${process.pid}.py`)
   fs.writeFileSync(scriptPath, 'def main():\n    x = 1\n    return x\nmain()\n')
   const spec = resolveAdapter({ adapter: 'debugpy', program: scriptPath })

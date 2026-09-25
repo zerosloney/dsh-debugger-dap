@@ -20,5 +20,10 @@
         ledgerPath: ''
         # 台账文件大小上限；超限轮转到 <path>.1
         ledgerMaxBytes: 5242880
+        # launch/attach 适配器缺失时先自动安装一次再重试（debugpy→pip、dlv→go install、
+        # netcoredbg→下载 release 到 ~/.dsh-debugger-dap/adapters/）；install_adapter 动作不受此开关限制
+        autoInstallAdapters: false
+        # 单个安装步骤（pip / go install / release 下载）超时（毫秒）
+        installTimeoutMs: 600000
         # 追加/覆盖内置适配器配方（debugpy、dlv）
         adapters: {}

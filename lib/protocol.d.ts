@@ -54,6 +54,12 @@ export interface DapCapabilities {
     supportsReadMemoryRequest?: boolean;
     supportsCompletionsRequest?: boolean;
 }
+/**
+ * Read the capabilities subset used by this plugin. Per the DAP spec the
+ * `initialize` response body (and the `capabilities` event body) IS the
+ * Capabilities object — its fields sit at the top level, not nested under
+ * a `capabilities` key.
+ */
 export declare function readCapabilities(body: Record<string, unknown> | undefined): DapCapabilities;
 /** `stopped` event body. */
 export interface DapStoppedEvent {

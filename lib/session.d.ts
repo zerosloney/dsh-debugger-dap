@@ -17,6 +17,8 @@ export interface SessionLimits {
     maxStackFrames: number;
     maxVariables: number;
     maxResultChars: number;
+    /** Timeout for the install_adapter action (and auto-install); falls back to the install module default. */
+    installTimeoutMs?: number;
 }
 /** Where the debuggee currently is; part of every model-facing result. */
 export interface DebugSnapshot {
@@ -373,7 +375,7 @@ export declare class DebugSessionManager {
         resolveAdapter: (options: {
             adapter?: string;
             program: string;
-        }) => AdapterSpec;
+        }) => AdapterSpec | Promise<AdapterSpec>;
         limits: SessionLimits;
         /** Idle time after which a session is auto-disconnected; 0 disables. Default 30 minutes. */
         sessionIdleTimeoutMs?: number;
@@ -390,7 +392,7 @@ export declare class DebugSessionManager {
     attach(owner: object, request: ManagerAttachRequest, signal?: AbortSignal): Promise<DebugSnapshot>;
     sessionFor(owner: object, id?: string): DebugSession;
     list(owner: object): DebugSnapshot[];
-    /** Query the session trace ledger (跨会话、跨重启可回溯)。 */
+    /** Query the session trace ledger (across sessions and host restarts). */
     ledgerQuery(options?: LedgerQuery): {
         entries: LedgerEntry[];
         truncated: boolean;

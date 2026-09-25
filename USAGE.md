@@ -1,6 +1,6 @@
-# dsh-debugger-dap 使用文档（41 个动作）
+# dsh-debugger-dap 使用文档（42 个动作）
 
-`debug` 工具通过一个判别式参数 `action` 覆盖整套调试流程：启动/附加、各类断点（源码/函数/异常/数据/观察点）、步进与反向步进、非顺序跳转、栈/作用域/变量检视（分页/十六进制/过滤）、内存读取与反汇编、代码补全、求值与运行时改值、异常信息、输出捕获与审计台账。
+`debug` 工具通过一个判别式参数 `action` 覆盖整套调试流程：启动/附加/适配器安装、各类断点（源码/函数/异常/数据/观察点）、步进与反向步进、非顺序跳转、栈/作用域/变量检视（分页/十六进制/过滤）、内存读取与反汇编、代码补全、求值与运行时改值、异常信息、输出捕获与审计台账。
 
 - **每个响应都带会话快照**，模型始终知道 `Session/Adapter/Status/Stop reason/Location/Exit code/Capabilities`。
 - **恢复类动作（continue/step_*）等待下一次停机**，超时返回 `running` 状态并提示用 `pause`，调用永不悬挂；恢复类动作返回同时携带自上次读取以来的**增量输出**。
@@ -14,7 +14,7 @@
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `session_id` | string | 显式指定会话；缺省用当前 agent 的活跃会话 |
-| `adapter` | string | 适配器 id：`debugpy`/`dlv`/`netcoredbg`/`lldb-dap`/`codelldb`/自定义；launch 缺省按扩展名猜（`.py`→debugpy、`.go`→dlv、`.dll`/`.exe`→netcoredbg），attach 必填 |
+| `adapter` | string | 适配器 id：`debugpy`/`dlv`/`netcoredbg`/`lldb-dap`/`codelldb`/自定义；launch 缺省按扩展名猜（`.py`→debugpy、`.go`→dlv、`.dll`/`.exe`→netcoredbg），attach 必填；`install_adapter` 用它指定装哪个（仅 debugpy/dlv/netcoredbg 可装） |
 
 内置适配器（无需额外配置，只需调试器在 PATH）：
 - `debugpy`（Python）：`pip install debugpy`
@@ -22,6 +22,8 @@
 - `netcoredbg`（.NET）：从 https://github.com/Samsung/netcoredbg/releases 下载并加入 PATH（插件已内置 `type: coreclr` 与 `stopAtEntry` 处理）
 - `lldb-dap`（C/C++/Rust）：LLVM 工具链自带的 DAP 二进制（兼容 `lldb-dap` / `lldb-vscode` / `llvm-dap`）
 - `codelldb`（C/C++/Rust）：CodeLLDB 独立 DAP 服务器（自动探测 TCP 端口）
+
+> 💡 缺装时可用 `install_adapter` 一键安装（debugpy/dlv/netcoredbg），详见第 3 节；也可以在配置里打开 `autoInstallAdapters` 让 launch 自动补装。
 
 ---
 
@@ -65,7 +67,28 @@
 
 ---
 
-## 3. `set_breakpoints` — 文件行断点（整体替换某文件的断点集）
+## 3. `install_adapter` — 安装缺失的适配器（无需会话）
+
+显式触发一次适配器安装，装完即可正常 `launch`。三个内置可装的适配器：
+
+| adapter | 安装方式 | 前置条件 |
+|---|---|---|
+| `debugpy` | `python -m pip install debugpy`（失败自动以 `--user` 重试） | 本机有 `python`/`python3` |
+| `dlv` | `go install ...dlv@latest`，随后把二进制复制到 `~/.dsh-debugger-dap/adapters/` | 本机有 Go 工具链 |
+| `netcoredbg` | 从 GitHub release 下载对应平台压缩包解压到 `~/.dsh-debugger-dap/adapters/netcoredbg/` | 网络可达 |
+
+```json
+{ "action": "install_adapter", "adapter": "debugpy" }
+```
+
+- 已安装时返回 `already available`，不重复安装。
+- 安装产物目录带 `.dsh-adapter-bin` 标记，插件每次启动自动重新扫描并纳入 PATH 探测——**不需要手动改系统 PATH，重启宿主也生效**。
+- 失败时错误信息内嵌安装输出尾部（pip/go 的原始报错），可据此自愈或转人工。
+- 开启 `autoInstallAdapters` 配置后，`launch`/`attach` 遇到适配器缺失会先自动走一遍此流程再重试（见配置速查）。
+
+---
+
+## 4. `set_breakpoints` — 文件行断点（整体替换某文件的断点集）
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -82,7 +105,7 @@
 
 ---
 
-## 4. `set_function_breakpoints` — 函数断点
+## 5. `set_function_breakpoints` — 函数断点
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -97,7 +120,7 @@
 
 ---
 
-## 5. `set_exception_breakpoints` — 异常断点
+## 6. `set_exception_breakpoints` — 异常断点
 
 | 参数 | 说明 |
 |---|---|
@@ -112,7 +135,7 @@
 
 ---
 
-## 6. `continue` / `step_in` / `step_over` / `step_out` — 恢复执行 / 步进
+## 7. `continue` / `step_in` / `step_over` / `step_out` — 恢复执行 / 步进
 
 | 参数 | 说明 |
 |---|---|
@@ -127,7 +150,7 @@
 
 ---
 
-## 7. `step_back` / `reverse_continue` — 反向步进 / 反向继续
+## 8. `step_back` / `reverse_continue` — 反向步进 / 反向继续
 
 | 参数 | 说明 |
 |---|---|
@@ -142,7 +165,7 @@
 
 ---
 
-## 8. `pause` — 中断正在运行的程序
+## 9. `pause` — 中断正在运行的程序
 
 ```json
 { "action": "pause" }
@@ -151,7 +174,7 @@
 
 ---
 
-## 9. `threads` — 列出线程
+## 10. `threads` — 列出线程
 
 ```json
 { "action": "threads" }
@@ -160,7 +183,7 @@
 
 ---
 
-## 10. `select_thread` — 切换焦点线程
+## 11. `select_thread` — 切换焦点线程
 
 | 参数 | 说明 |
 |---|---|
@@ -173,7 +196,7 @@
 
 ---
 
-## 11. `stack_trace` — 栈帧
+## 12. `stack_trace` — 栈帧
 
 | 参数 | 说明 |
 |---|---|
@@ -187,7 +210,7 @@
 
 ---
 
-## 12. `scopes` — 作用域
+## 13. `scopes` — 作用域
 
 | 参数 | 说明 |
 |---|---|
@@ -200,7 +223,7 @@
 
 ---
 
-## 13. `variables` — 变量列表与结构展开
+## 14. `variables` — 变量列表与结构展开
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -217,7 +240,7 @@
 
 ---
 
-## 14. `evaluate` — 表达式求值
+## 15. `evaluate` — 表达式求值
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -232,7 +255,7 @@
 
 ---
 
-## 15. `set_variable` — 写变量
+## 16. `set_variable` — 写变量
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -247,7 +270,7 @@
 
 ---
 
-## 16. `set_expression` — 写表达式
+## 17. `set_expression` — 写表达式
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -262,7 +285,7 @@
 
 ---
 
-## 17. `exception_info` — 异常详情
+## 18. `exception_info` — 异常详情
 
 | 参数 | 说明 |
 |---|---|
@@ -276,7 +299,7 @@
 
 ---
 
-## 18. `data_breakpoint_info` — 查询数据断点（Watchpoint）能力
+## 19. `data_breakpoint_info` — 查询数据断点（Watchpoint）能力
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -291,7 +314,7 @@
 
 ---
 
-## 19. `set_data_breakpoints` — 设置数据断点（Watchpoint / 内存断点）
+## 20. `set_data_breakpoints` — 设置数据断点（Watchpoint / 内存断点）
 
 | 参数 | 说明 |
 |---|---|
@@ -312,7 +335,7 @@
 
 ---
 
-## 20. `disassemble` — 反汇编指令读取
+## 21. `disassemble` — 反汇编指令读取
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -329,7 +352,7 @@
 
 ---
 
-## 21. `read_memory` — 读取原始内存数据（标准 Hexdump 渲染）
+## 22. `read_memory` — 读取原始内存数据（标准 Hexdump 渲染）
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -349,7 +372,7 @@ Memory at 0x7fffffffe000 (32 bytes):
 
 ---
 
-## 22. `completions` — REPL 上下文代码补全
+## 23. `completions` — REPL 上下文代码补全
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -365,7 +388,7 @@ Memory at 0x7fffffffe000 (32 bytes):
 
 ---
 
-## 23. `goto_targets` / `goto` — 非顺序跳转
+## 24. `goto_targets` / `goto` — 非顺序跳转
 
 | 参数 | 说明 |
 |---|---|
@@ -380,7 +403,7 @@ Memory at 0x7fffffffe000 (32 bytes):
 
 ---
 
-## 24. `restart_frame` — 重跑栈帧（函数重新进入）
+## 25. `restart_frame` — 重跑栈帧（函数重新进入）
 
 | 参数 | 说明 |
 |---|---|
@@ -393,7 +416,7 @@ Memory at 0x7fffffffe000 (32 bytes):
 
 ---
 
-## 25. `add_watch` / `remove_watch` / `list_watches` — 观察表达式
+## 26. `add_watch` / `remove_watch` / `list_watches` — 观察表达式
 
 | 参数 | 说明 |
 |---|---|
@@ -409,7 +432,7 @@ Memory at 0x7fffffffe000 (32 bytes):
 
 ---
 
-## 26. `source` — 读取源码内容
+## 27. `source` — 读取源码内容
 
 | 参数 | 说明 |
 |---|---|
@@ -422,7 +445,7 @@ Memory at 0x7fffffffe000 (32 bytes):
 
 ---
 
-## 27. `loaded_sources` — 列出已加载源文件
+## 28. `loaded_sources` — 列出已加载源文件
 
 ```json
 { "action": "loaded_sources" }
@@ -431,7 +454,7 @@ Memory at 0x7fffffffe000 (32 bytes):
 
 ---
 
-## 28. `modules` — 列出已加载模块
+## 29. `modules` — 列出已加载模块
 
 | 参数 | 说明 |
 |---|---|
@@ -445,7 +468,7 @@ Memory at 0x7fffffffe000 (32 bytes):
 
 ---
 
-## 29. `output` — 读取捕获的程序输出
+## 30. `output` — 读取捕获的程序输出
 
 | 参数 | 说明 |
 |---|---|
@@ -459,7 +482,7 @@ Memory at 0x7fffffffe000 (32 bytes):
 
 ---
 
-## 30. `ledger` — 查询会话审计台账
+## 31. `ledger` — 查询会话审计台账
 
 返回关键调试事件（跨会话、跨重启可回溯），供问题排查与模型自我反思。
 
@@ -476,7 +499,7 @@ Memory at 0x7fffffffe000 (32 bytes):
 
 ---
 
-## 31. `restart` — 按原始 launch 配置重启
+## 32. `restart` — 按原始 launch 配置重启
 
 ```json
 { "action": "restart" }
@@ -485,7 +508,7 @@ Memory at 0x7fffffffe000 (32 bytes):
 
 ---
 
-## 32. `terminate` — 优雅终止被调试程序
+## 33. `terminate` — 优雅终止被调试程序
 
 ```json
 { "action": "terminate" }
@@ -494,7 +517,7 @@ Memory at 0x7fffffffe000 (32 bytes):
 
 ---
 
-## 33. `disconnect` — 结束会话
+## 34. `disconnect` — 结束会话
 
 | 参数 | 说明 |
 |---|---|
@@ -507,7 +530,7 @@ Memory at 0x7fffffffe000 (32 bytes):
 
 ---
 
-## 34. `sessions` — 列出当前 agent 的会话
+## 35. `sessions` — 列出当前 agent 的会话
 
 ```json
 { "action": "sessions" }
@@ -571,6 +594,9 @@ Memory at 0x7fffffffe000 (32 bytes):
     maxStackFrames: 20
     maxVariables: 100
     maxResultChars: 16000
+    # autoInstallAdapters: true  # launch/attach 适配器缺失时先自动安装（debugpy→pip、dlv→go install、
+    #                             # netcoredbg→GitHub release 下载到 ~/.dsh-debugger-dap/adapters/）
+    # installTimeoutMs: 600000   # 单个安装步骤（pip/go install/下载）超时（毫秒）
     adapters:
       # 支持使用 '~'、'%USERPROFILE%'、'$HOME' 跨平台解析不同用户的家目录与动态版本
       js-debug:
@@ -579,6 +605,10 @@ Memory at 0x7fffffffe000 (32 bytes):
         transport: tcp        # 缺省 stdio；js-debug 是 TCP server
         launchArgs: { sourceMaps: true }
         # announceStream: stderr  # 端口播报流：stdout/stderr/both（默认 both）
+        # portPattern: '[Dd]ebug server listening at:?\\s+(.*):(\\d+)'
+        #   # 端口自动发现正则（未配置 connectPort 时）：最后一个捕获组是端口，
+        #   # 两组时前一组是公告的 host（js-debug 默认绑 IPv6 ::1，必须捕获 host 才连得上）
+        # stopOnEntryKey: stopOnEntry  # launch 请求中控制入口停机的字段名（netcoredbg 类适配器为 stopAtEntry）
       codelldb:
         command: '~/.vscode/extensions/vadimcn.vscode-lldb/adapter/codelldb'
         args: ['--port', '0']

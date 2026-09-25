@@ -4,17 +4,18 @@
 
 DAP 交互式调试器，作为 [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh-tools) 的独立插件：通过一个面向模型的 `debug` 工具完成启动调试适配器、断点、单步、栈/变量检视、表达式求值与程序输出捕获。零宿主源码改动，旁挂即用。
 
-> 📖 完整动作与参数示例见 **[USAGE.md](./USAGE.md)**（41 个动作：launch/attach、函数/异常/数据断点、步进/反向继续、跳转、检视/分页/十六进制、内存读取与反汇编、REPL 补全、源码/模块读取、运行时改值、异常信息等）。
+> 📖 完整动作与参数示例见 **[USAGE.md](./USAGE.md)**（42 个动作：launch/attach、适配器安装、函数/异常/数据断点、步进/反向继续、跳转、检视/分页/十六进制、内存读取与反汇编、REPL 补全、源码/模块读取、运行时改值、异常信息等）。
 
 
 ## 工具面
 
-单个 `debug` 工具，`action` 参数判别，共 41 个动作：
+单个 `debug` 工具，`action` 参数判别，共 42 个动作：
 
 | 动作 | 说明 | 分层 |
 |---|---|---|
 | `launch` | 启动适配器并运行被调试程序（默认停在入口） | 执行 |
 | `attach` | 按 `process_id` 附加到已运行进程（需显式 `adapter`） | 执行 |
+| `install_adapter` | 一键安装缺失适配器（debugpy→pip、dlv→go install、netcoredbg→下载 release 到 `~/.dsh-debugger-dap/adapters/`） | 执行 |
 | `set_breakpoints` | 整体替换一个文件的断点集（行号 + `condition`/`hit_condition`/`log_message`） | 执行 |
 | `set_function_breakpoints` | 按函数名下断点（`functions` + `condition`/`hit_condition`） | 执行 |
 | `set_exception_breakpoints` | 配置哪些异常中断（`filters` 如 `['all']`，或 `filter_options`） | 执行 |
@@ -120,17 +121,19 @@ dsh plugin add --profile debugger dsh-debugger-dap@latest
 | `maxResultChars` | 16000 | 模型可见文本结果上限 |
 | `sessionIdleTimeoutMs` | 1800000 (30min) | 会话空闲自动断开；0 禁用回收 |
 | `maxSessionsPerOwner` | 5 | 每 agent 存活会话上限，超出后淘汰最久空闲者（活跃会话保留） |
+| `autoInstallAdapters` | `false` | launch/attach 适配器缺失时先自动安装一次再重试（debugpy→pip、dlv→go install、netcoredbg→下载 release）；`install_adapter` 动作不受此开关限制 |
+| `installTimeoutMs` | 600000 (10min) | 单个安装步骤（pip / go install / release 下载）超时 |
 | `adapters` | `{}` | 追加自定义适配器配方 / 覆盖内置配方，见下 |
 
-内置配方无需配置即可用（前提是相应调试器在 PATH）：`debugpy`（pip install debugpy）、`dlv`（go install），以及 `.NET`：
+内置配方无需配置即可用（前提是相应调试器在 PATH）；缺装时可用 `install_adapter` 一键安装（debugpy/dlv/netcoredbg，装到 `~/.dsh-debugger-dap/adapters/` 并自动纳入探测，无需手动改 PATH）：
 
 ```sh
-# netcoredbg 一键示意：下载对应平台 release 解压后把目录加入 PATH 即可
-# https://github.com/Samsung/netcoredbg/releases
+# netcoredbg：一键安装后即可 launch（自动下载对应平台 release 到 ~/.dsh-debugger-dap/adapters/）
+debug install_adapter adapter=netcoredbg
 debug launch adapter=netcoredbg program=<构建出的>.dll cwd=<项目目录>
 ```
 
-覆盖内置配方或声明其他 stdio 适配器（`launchArgs` 会并入 DAP `launch` 请求体，用于适配器特有的启动参数，如 `sourceMaps`、`justMyCode`；覆盖内置配方时缺省的 `launchArgs`/入口停止字段会继承自带默认）。TCP 适配器若不带 `connectPort`，端口从子进程 stdout/stderr 播报中发现——默认同时扫描两条流并匹配 `Listening on port <N>`，可用 `portPattern` 声明自定义格式（正则字符串，一个捕获组为端口），用 `announceStream` 固定到 `stdout`/`stderr`（适配 `node --inspect` 这类把播报写到 stderr 的调试器）：
+覆盖内置配方或声明其他 stdio 适配器（`launchArgs` 会并入 DAP `launch` 请求体，用于适配器特有的启动参数，如 `sourceMaps`、`justMyCode`；覆盖内置配方时缺省的 `launchArgs`/入口停止字段会继承自带默认）。TCP 适配器若不带 `connectPort`，端口从子进程 stdout/stderr 播报中发现——默认同时扫描两条流并匹配 `Listening on port <N>`，可用 `portPattern` 声明自定义格式（正则字符串，最后一个捕获组为端口，两组时前一组是公告的 host），用 `announceStream` 固定到 `stdout`/`stderr`（适配 `node --inspect` 这类把播报写到 stderr 的调试器）：
 
 ```yaml
 - id: debugger-dap

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { spawnDapAdapter, spawnTcpAdapterWithDiscovery, spawnAdapter } from '../lib/connection.js'
+import { spawnDapAdapter, spawnTcpAdapterWithDiscovery, spawnAdapter, spawnTcpAdapterWithPort } from '../lib/connection.js'
+import { JS_DEBUG_PORT_PATTERN } from '../lib/adapters.js'
 
 /** Child script: listen on a random port, print it, and answer DAP requests. */
 const echoAdapterScript = `
@@ -324,3 +325,120 @@ setInterval(() => {}, 1000)
   }
 })
 
+test('discovery connects through the host announced js-debug style', async () => {
+  // dapDebugServer announces "Debug server listening at <host>:<port>"
+  // (not codelldb's "Listening on port N"), and the host may be an IPv6
+  // loopback: the second capture group must drive the connect host.
+  const script = `
+const net = require('node:net')
+const server = net.createServer(socket => {
+  let buf = Buffer.alloc(0)
+  socket.on('data', chunk => {
+    buf = Buffer.concat([buf, chunk])
+    const headerEnd = buf.indexOf('\\r\\n\\r\\n')
+    if (headerEnd === -1) return
+    const match = /Content-Length: (\\d+)/.exec(buf.slice(0, headerEnd).toString())
+    if (match === null) return
+    const length = Number(match[1])
+    const bodyStart = headerEnd + 4
+    if (buf.length < bodyStart + length) return
+    const message = JSON.parse(buf.slice(bodyStart, bodyStart + length).toString())
+    const reply = { seq: 1, type: 'response', request_seq: message.seq, command: message.command, success: true }
+    const body = Buffer.from(JSON.stringify(reply))
+    socket.write(Buffer.concat([Buffer.from('Content-Length: ' + body.length + '\\r\\n\\r\\n'), body]))
+  })
+})
+server.listen(0, '127.0.0.1', () => {
+  console.log('Debug server listening at 127.0.0.1:' + server.address().port)
+})
+`
+  const spawned = await spawnTcpAdapterWithDiscovery([process.execPath, '-e', script], {
+    discoveryTimeoutMs: 5000,
+    requestTimeoutMs: 5000,
+    portPattern: JS_DEBUG_PORT_PATTERN,
+  })
+  try {
+    const reply = await spawned.connection.send('initialize', { adapterID: 'test' })
+    assert.deepEqual(reply, {})
+  } finally {
+    await spawned.kill()
+  }
+})
+
+test('fixed-port spawn drains adapter stdout so a chatty adapter keeps answering', async () => {
+  // The child synchronously writes 512 KiB to stdout after binding — far
+  // beyond any OS pipe buffer. Without a stdout reader on the parent side
+  // the child blocks inside writeSync and never answers DAP requests.
+  const net = await import('node:net')
+  const hint = await new Promise(resolve => {
+    const srv = net.createServer()
+    srv.listen(0, '127.0.0.1', () => {
+      const port = srv.address().port
+      srv.close(() => resolve(port))
+    })
+  })
+  const script = `
+const net = require('node:net')
+const fs = require('node:fs')
+const port = Number(process.env.TEST_PORT)
+const server = net.createServer(socket => {
+  let buf = Buffer.alloc(0)
+  socket.on('data', chunk => {
+    buf = Buffer.concat([buf, chunk])
+    const headerEnd = buf.indexOf('\\r\\n\\r\\n')
+    if (headerEnd === -1) return
+    const match = /Content-Length: (\\d+)/.exec(buf.slice(0, headerEnd).toString())
+    if (match === null) return
+    const length = Number(match[1])
+    const bodyStart = headerEnd + 4
+    if (buf.length < bodyStart + length) return
+    const message = JSON.parse(buf.slice(bodyStart, bodyStart + length).toString())
+    const reply = { seq: 1, type: 'response', request_seq: message.seq, command: message.command, success: true }
+    const body = Buffer.from(JSON.stringify(reply))
+    socket.write(Buffer.concat([Buffer.from('Content-Length: ' + body.length + '\\r\\n\\r\\n'), body]))
+  })
+})
+server.listen(port, '127.0.0.1', () => {
+  const chunk = Buffer.alloc(64 * 1024, 0x61)
+  for (let i = 0; i < 8; i++) fs.writeSync(1, chunk)
+})
+`
+  const spawned = await spawnTcpAdapterWithPort([process.execPath, '-e', script], {
+    host: '127.0.0.1',
+    port: hint,
+    env: { TEST_PORT: String(hint) },
+    requestTimeoutMs: 5000,
+  })
+  try {
+    const reply = await spawned.connection.send('initialize', { adapterID: 'test' })
+    assert.deepEqual(reply, {})
+  } finally {
+    await spawned.kill()
+  }
+})
+
+
+test('spawn resolves adapter binaries from the managed dirs (PATH injection)', async () => {
+  // A bare command that exists ONLY in a managed dir must spawn: the child
+  // env gets the managed dirs prepended to PATH. The fake adapter is a copy
+  // of the node executable, so spawn resolution is exercised for real.
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const { addManagedBinDir, resetManagedBinDirs } = await import('../lib/install.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-dap-spawnpath-'))
+  try {
+    const name = process.platform === 'win32' ? 'zz-dap-managed-spawn.exe' : 'zz-dap-managed-spawn'
+    fs.copyFileSync(process.execPath, path.join(dir, name))
+    if (process.platform !== 'win32') fs.chmodSync(path.join(dir, name), 0o755)
+    fs.writeFileSync(path.join(dir, '.dsh-adapter-bin'), '')
+    addManagedBinDir(dir)
+    const spawned = spawnDapAdapter(['zz-dap-managed-spawn', '-e', 'setInterval(() => {}, 1000)'], { requestTimeoutMs: 2000 })
+    // The connection exists immediately; spawn resolution already happened.
+    assert.equal(spawned.connection.isClosed, false)
+    await spawned.kill()
+  } finally {
+    resetManagedBinDirs()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

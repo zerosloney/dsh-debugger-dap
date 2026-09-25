@@ -1,4 +1,4 @@
-// 探针：debugpy 异常断点过滤器能力 + setExceptionBreakpoints(['all']) 是否生效。
+// Probe: debugpy exception filter capabilities + whether setExceptionBreakpoints(['all']) takes effect.
 import { DebugSessionManager } from '../lib/session.js'
 import { spawnAdapter } from '../lib/connection.js'
 import { resolveAdapter } from '../lib/adapters.js'
@@ -15,10 +15,10 @@ const owner = {}
 const snap = await manager.launch(owner, { program: fixture })
 console.log('launch:', snap.status, snap.stopReason)
 const caps = snap.capabilities ?? {}
-console.log('exception filters 声明:', JSON.stringify(caps))
+console.log('declared exception filters:', JSON.stringify(caps))
 
 const session = manager.sessionFor(owner)
-// 直接发原始请求看响应
+// Send the raw request to see the response
 try {
   const body = await session.connection.send(
     'setExceptionBreakpoints',

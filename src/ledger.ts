@@ -1,25 +1,26 @@
 /**
- * 调试会话台账（Debug Ledger）：把每次调试会话的关键事件追加到
- * 持久化 JSONL 文件，并提供进程内查询，便于问题回溯。
+ * Debug session ledger: appends one JSON line per key debug event to a
+ * persistent JSONL file and serves in-process queries for later forensics.
  *
- * 记录的事件种类（LedgerKind）：
- *  - session_start    会话创建（launch/attach、适配器、程序、cwd）
- *  - session_end      会话结束（disconnect / 适配器关闭 / debuggee 退出）
- *  - breakpoints_set  断点设置（文件 + 行号 + 命中验证数）
- *  - breakpoint_hit   断点命中（reason=breakpoint，尽力附加顶层帧位置）
- *  - exception        异常停机（reason=exception，尽力附加位置与描述）
- *  - stop             其它停机（step/pause/entry 等）
- *  - request_error    模型动作失败（稳定错误码 + 消息）
+ * Event kinds (LedgerKind):
+ *  - session_start    session created (launch/attach, adapter, program, cwd)
+ *  - session_end      session ended (disconnect / adapter close / debuggee exit)
+ *  - breakpoints_set  breakpoints configured (file + lines + verified count)
+ *  - breakpoint_hit   breakpoint reached (reason=breakpoint, best-effort top-frame location)
+ *  - exception        exception stop (reason=exception, best-effort location/description)
+ *  - stop             any other stop (step/pause/entry, ...)
+ *  - request_error    model action failed (stable error code + message)
  *
- * 设计约束：台账是尽力而为（best-effort）的旁路设施——写入失败绝不
- * 影响调试主流程，只累计 writeFailureCount 供诊断。
+ * Design constraint: the ledger is a best-effort side channel — write
+ * failures never affect the debug flow itself; only writeFailureCount
+ * accumulates for diagnostics.
  */
 
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from 'node:fs'
+import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-/** 默认台账路径：~/.dsh-debugger-dap/ledger.jsonl */
+/** Default ledger path: ~/.dsh-debugger-dap/ledger.jsonl */
 export const DEFAULT_LEDGER_PATH = join(homedir(), '.dsh-debugger-dap', 'ledger.jsonl')
 
 export type LedgerKind =
@@ -31,26 +32,29 @@ export type LedgerKind =
   | 'stop'
   | 'request_error'
 
-/** 一条台账记录（JSON 安全，可整行写入 JSONL）。 */
+/** Every ledger event kind (single source of truth for argument validation and docs). */
+export const LEDGER_KINDS = ['session_start', 'session_end', 'breakpoints_set', 'breakpoint_hit', 'exception', 'stop', 'request_error'] as const satisfies readonly LedgerKind[]
+
+/** One ledger record (JSON-safe; written as one JSONL line). */
 export interface LedgerEntry {
-  /** 进程内单调序号，也即写盘顺序。 */
+  /** In-process monotonic sequence; also the disk write order. */
   readonly seq: number
-  /** ISO-8601 时间戳。 */
+  /** ISO-8601 timestamp. */
   readonly ts: string
-  /** 所属会话 id；请求级错误无会话时为空。 */
+  /** Owning session id; undefined for request-level errors with no session. */
   readonly sessionId: string | undefined
   readonly kind: LedgerKind
   readonly detail: Record<string, unknown>
 }
 
 export interface LedgerQuery {
-  /** 只查某会话；缺省查全部。 */
+  /** Restrict to one session; default: all sessions. */
   sessionId?: string
-  /** 只查某些种类；空数组/缺省查全部。 */
+  /** Restrict to these kinds; empty/absent: all kinds. */
   kinds?: readonly LedgerKind[]
-  /** 只查 ts >= since 的条目（ISO-8601 字符串比较）。 */
+  /** Only entries with ts >= since (ISO-8601 string comparison). */
   since?: string
-  /** 返回条数上限（默认 50，最大 500），取最新 N 条。 */
+  /** Max entries returned (default 50, max 500); the newest N are kept. */
   limit?: number
 }
 
@@ -61,30 +65,32 @@ export class DebugLedger {
   private readonly entries: LedgerEntry[] = []
   private seq = 0
   private writeErrors = 0
+  /** The directory only needs creating once; reset on write failure so the next record retries. */
+  private dirEnsured = false
 
   private constructor(
     private readonly filePath: string,
     private readonly maxFileBytes: number,
   ) {}
 
-  /** 创建台账；path 为空时使用默认路径，目录自动创建。 */
+  /** Create the ledger; an empty path uses the default, the directory is created on first write. */
   static create(options?: { path?: string; maxFileBytes?: number }): DebugLedger {
     const filePath = options?.path !== undefined && options.path.length > 0 ? options.path : DEFAULT_LEDGER_PATH
     const maxFileBytes = options?.maxFileBytes ?? 5 * 1024 * 1024
     return new DebugLedger(filePath, maxFileBytes)
   }
 
-  /** JSONL 文件路径（可人工查阅/归档）。 */
+  /** JSONL file path (human-readable / archivable). */
   get path(): string {
     return this.filePath
   }
 
-  /** 写盘失败的累计次数（0 = 全部成功）。 */
+  /** Cumulative disk-write failures (0 = all succeeded). */
   get writeFailureCount(): number {
     return this.writeErrors
   }
 
-  /** 追加一条记录：内存环形缓冲 + JSONL 追加写（同步、尽力而为）。 */
+  /** Append one record: in-memory ring buffer + JSONL append (synchronous, best-effort). */
   record(sessionId: string | undefined, kind: LedgerKind, detail: Record<string, unknown> = {}): void {
     const entry: LedgerEntry = { seq: ++this.seq, ts: new Date().toISOString(), sessionId, kind, detail }
     this.entries.push(entry)
@@ -92,24 +98,27 @@ export class DebugLedger {
       this.entries.splice(0, this.entries.length - MEMORY_CAP)
     }
     try {
-      mkdirSync(dirname(this.filePath), { recursive: true })
-      if (existsSync(this.filePath)) {
-        try {
-          if (statSync(this.filePath).size > this.maxFileBytes) {
-            // 简单轮转：超限时把当前文件改名为 .1（覆盖旧的 .1），继续写新文件。
-            renameSync(this.filePath, `${this.filePath}.1`)
-          }
-        } catch {
-          // 轮转失败（如文件被占用）就继续追加，不阻塞调试。
+      if (!this.dirEnsured) {
+        mkdirSync(dirname(this.filePath), { recursive: true })
+        this.dirEnsured = true
+      }
+      try {
+        if (statSync(this.filePath).size > this.maxFileBytes) {
+          // Simple rotation: past the cap the current file is renamed to .1
+          // (replacing the previous .1) and appending continues into a fresh file.
+          renameSync(this.filePath, `${this.filePath}.1`)
         }
+      } catch {
+        // Rotation check failed (file missing or locked): keep appending, never block debugging.
       }
       appendFileSync(this.filePath, `${JSON.stringify(entry)}\n`, 'utf8')
     } catch {
+      this.dirEnsured = false
       this.writeErrors += 1
     }
   }
 
-  /** 查询最新条目（按 seq 升序返回尾部 slice）。 */
+  /** Query the newest entries (returns the ascending-seq tail slice). */
   query(options?: LedgerQuery): { entries: LedgerEntry[]; truncated: boolean } {
     let list: readonly LedgerEntry[] = this.entries
     if (options?.sessionId !== undefined) list = list.filter(entry => entry.sessionId === options.sessionId)

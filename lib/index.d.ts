@@ -25,6 +25,8 @@ export interface Config {
     adapters: Record<string, AdapterConfigEntry>;
     ledgerPath: string;
     ledgerMaxBytes: number;
+    autoInstallAdapters: boolean;
+    installTimeoutMs: number;
 }
 export declare const Config: z<Schemastery.ObjectS<{
     requestTimeoutMs: z<number, number>;
@@ -35,6 +37,8 @@ export declare const Config: z<Schemastery.ObjectS<{
     maxResultChars: z<number, number>;
     sessionIdleTimeoutMs: z<number, number>;
     maxSessionsPerOwner: z<number, number>;
+    autoInstallAdapters: z<boolean, boolean>;
+    installTimeoutMs: z<number, number>;
     ledgerPath: z<string, string>;
     ledgerMaxBytes: z<number, number>;
     adapters: z<import("@deepseek-ai/cosmokit").Dict<{
@@ -43,6 +47,7 @@ export declare const Config: z<Schemastery.ObjectS<{
         env?: import("@deepseek-ai/cosmokit").Dict<string, string> | null | undefined;
         cwd?: string | null | undefined;
         launchArgs?: any;
+        stopOnEntryKey?: string | null | undefined;
         transport?: "stdio" | "tcp" | null | undefined;
         connectHost?: string | null | undefined;
         connectPort?: number | null | undefined;
@@ -55,6 +60,8 @@ export declare const Config: z<Schemastery.ObjectS<{
         env: z<import("@deepseek-ai/cosmokit").Dict<string, string>, import("@deepseek-ai/cosmokit").Dict<string, string>>;
         cwd: z<string, string>;
         launchArgs: z<any, any>;
+        /** `launch` field that carries the stop-on-entry control (default 'stopOnEntry'; e.g. netcoredbg needs 'stopAtEntry'). */
+        stopOnEntryKey: z<string, string>;
         /** Transport layer: 'stdio' (default) or 'tcp'. */
         transport: z<"stdio" | "tcp", "stdio" | "tcp">;
         /** TCP connect host (default '127.0.0.1'). Used when transport is 'tcp'. */
@@ -77,6 +84,8 @@ export declare const Config: z<Schemastery.ObjectS<{
     maxResultChars: z<number, number>;
     sessionIdleTimeoutMs: z<number, number>;
     maxSessionsPerOwner: z<number, number>;
+    autoInstallAdapters: z<boolean, boolean>;
+    installTimeoutMs: z<number, number>;
     ledgerPath: z<string, string>;
     ledgerMaxBytes: z<number, number>;
     adapters: z<import("@deepseek-ai/cosmokit").Dict<{
@@ -85,6 +94,7 @@ export declare const Config: z<Schemastery.ObjectS<{
         env?: import("@deepseek-ai/cosmokit").Dict<string, string> | null | undefined;
         cwd?: string | null | undefined;
         launchArgs?: any;
+        stopOnEntryKey?: string | null | undefined;
         transport?: "stdio" | "tcp" | null | undefined;
         connectHost?: string | null | undefined;
         connectPort?: number | null | undefined;
@@ -97,6 +107,8 @@ export declare const Config: z<Schemastery.ObjectS<{
         env: z<import("@deepseek-ai/cosmokit").Dict<string, string>, import("@deepseek-ai/cosmokit").Dict<string, string>>;
         cwd: z<string, string>;
         launchArgs: z<any, any>;
+        /** `launch` field that carries the stop-on-entry control (default 'stopOnEntry'; e.g. netcoredbg needs 'stopAtEntry'). */
+        stopOnEntryKey: z<string, string>;
         /** Transport layer: 'stdio' (default) or 'tcp'. */
         transport: z<"stdio" | "tcp", "stdio" | "tcp">;
         /** TCP connect host (default '127.0.0.1'). Used when transport is 'tcp'. */

@@ -1,4 +1,4 @@
-// 探针：直接 spawn python -m debugpy.adapter 并做 DAP initialize，定位握手卡点。
+// Probe: spawn python -m debugpy.adapter directly and run a DAP initialize to locate handshake stalls.
 import { spawnAdapter } from '../lib/connection.js'
 
 const spec = { command: 'python', args: ['-m', 'debugpy.adapter'], launchArgs: {}, stopOnEntryKey: 'stopOnEntry' }

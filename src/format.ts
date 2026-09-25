@@ -42,6 +42,9 @@ export interface DebugToolValue {
   snapshot?: DebugSnapshot
   state?: 'stopped' | 'running' | 'terminated'
   timed_out?: boolean
+  adapter?: string
+  already_installed?: boolean
+  command?: string
   file?: string
   breakpoints?: Array<{ id: string; verified: boolean; message?: string } | BreakpointRecord | FunctionBreakpointRecord>
   frames?: DapFrameView[]
@@ -276,6 +279,15 @@ export function renderDebugText(value: DebugToolValue, maxResultChars: number, s
       sections = formatSnapshotLines(value.snapshot ?? unreachableSnapshot())
       if (value.action === 'disconnect') sections.push('Debug session disconnected.')
       break
+    case 'install_adapter': {
+      const name = value.adapter ?? '?'
+      const status = value.already_installed === true ? 'already available' : 'installed'
+      sections = [`Adapter ${name}: ${status}${value.command !== undefined ? ` (command: ${value.command})` : ''}.`]
+      if (value.content !== undefined && value.content.length > 0) {
+        sections.push(`Install output:\n${value.content}`)
+      }
+      break
+    }
     case 'sessions':
       sections = formatSessions(value.sessions ?? [])
       break

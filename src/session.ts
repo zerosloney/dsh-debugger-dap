@@ -59,6 +59,8 @@ export interface SessionLimits {
   maxStackFrames: number
   maxVariables: number
   maxResultChars: number
+  /** Timeout for the install_adapter action (and auto-install); falls back to the install module default. */
+  installTimeoutMs?: number
 }
 
 /** Where the debuggee currently is; part of every model-facing result. */
@@ -155,7 +157,6 @@ export class DebugError extends Error {
 }
 
 export type SpawnAdapterFn = (spec: AdapterSpec) => SpawnedAdapter | Promise<SpawnedAdapter>
-
 interface StopWaiter {
   resolve: (state: 'stopped' | 'terminated') => void
   timer: ReturnType<typeof setTimeout> | undefined
@@ -281,7 +282,7 @@ export class DebugSession {
           detail.function = frame.name
         }
       } catch {
-        // 位置补全是尽力而为：停机本身仍然入账。
+        // Location enrichment is best-effort: the stop itself is still recorded.
       }
     }
     const kind: LedgerKind =
@@ -783,7 +784,7 @@ export class DebugSession {
   }
 
   async setExceptionBreakpoints(filters: readonly string[], filterOptions: unknown[] | undefined, signal?: AbortSignal): Promise<void> {
-    // 配方级过滤器映射（如 debugpy 的 'all' → 'raised'）：模型侧保持标准 DAP 词汇。
+    // Recipe-level filter mapping (e.g. debugpy 'all' → 'raised'): the model keeps speaking standard DAP vocabulary.
     const mapped = [...filters].map(filter => this.exceptionFilterMap?.[filter] ?? filter)
     const body: Record<string, unknown> = {
       filters: mapped,
@@ -1115,7 +1116,10 @@ export class DebugSession {
       // ignore
     }
     this.status = 'terminated'
-    this.recordLedger('session_end', { reason: 'terminate' })
+    // The adapter's own 'terminated' event (if any) and a later disconnect
+    // must not produce a second session_end entry.
+    this.wakeStopWaiter('terminated')
+    this.endLedger('terminate')
     return this.snapshot()
   }
 
@@ -1206,7 +1210,10 @@ export class DebugSession {
 
   private async finishConfiguration(signal?: AbortSignal): Promise<void> {
     if (this.configurationDoneSent || this.status === 'terminated') return
-    if (this.capabilities.supportsConfigurationDoneRequest === false) {
+    // Per the DAP spec the request is sent only when the adapter declared
+    // the capability; a missing value is treated as unsupported (matching
+    // VS Code's client behavior).
+    if (this.capabilities.supportsConfigurationDoneRequest !== true) {
       this.configurationDoneSent = true
       if (this.status === 'configuring') this.status = 'running'
       return
@@ -1477,7 +1484,7 @@ export class DebugSessionManager {
   constructor(
     private readonly deps: {
       spawn: SpawnAdapterFn
-      resolveAdapter: (options: { adapter?: string; program: string }) => AdapterSpec
+      resolveAdapter: (options: { adapter?: string; program: string }) => AdapterSpec | Promise<AdapterSpec>
       limits: SessionLimits
       /** Idle time after which a session is auto-disconnected; 0 disables. Default 30 minutes. */
       sessionIdleTimeoutMs?: number
@@ -1503,10 +1510,11 @@ export class DebugSessionManager {
   private readonly ledger: DebugLedger
 
   async launch(owner: object, request: ManagerLaunchRequest, signal?: AbortSignal): Promise<DebugSnapshot> {
-    const spec = this.deps.resolveAdapter({ adapter: request.adapterId, program: request.program })
+    const spec = await this.deps.resolveAdapter({ adapter: request.adapterId, program: request.program })
+    const createdSeq = this.nextId
     const id = `dbg-${this.nextId++}`
     const spawned = await this.deps.spawn(spec)
-    const session = new DebugSession(id, spec.command, request.program, spawned, this.deps.limits, 'launch', this.nextId, this.ledger, spec.exceptionFilterMap)
+    const session = new DebugSession(id, spec.command, request.program, spawned, this.deps.limits, 'launch', createdSeq, this.ledger, spec.exceptionFilterMap)
     session.noteCwd(request.cwd)
     session.wireEvents()
     session.recordLedger('session_start', {
@@ -1541,10 +1549,11 @@ export class DebugSessionManager {
   }
 
   async attach(owner: object, request: ManagerAttachRequest, signal?: AbortSignal): Promise<DebugSnapshot> {
-    const spec = this.deps.resolveAdapter({ adapter: request.adapterId, program: request.program ?? '' })
+    const spec = await this.deps.resolveAdapter({ adapter: request.adapterId, program: request.program ?? '' })
+    const createdSeq = this.nextId
     const id = `dbg-${this.nextId++}`
     const spawned = await this.deps.spawn(spec)
-    const session = new DebugSession(id, spec.command, request.program ?? `pid:${request.processId}`, spawned, this.deps.limits, 'attach', this.nextId, this.ledger, spec.exceptionFilterMap)
+    const session = new DebugSession(id, spec.command, request.program ?? `pid:${request.processId}`, spawned, this.deps.limits, 'attach', createdSeq, this.ledger, spec.exceptionFilterMap)
     session.noteCwd(request.cwd)
     session.wireEvents()
     session.recordLedger('session_start', {
@@ -1600,7 +1609,7 @@ export class DebugSessionManager {
     return [...this.sessions.values()].filter(record => record.owner === owner).map(record => record.session.snapshot())
   }
 
-  /** Query the session trace ledger (跨会话、跨重启可回溯)。 */
+  /** Query the session trace ledger (across sessions and host restarts). */
   ledgerQuery(options?: LedgerQuery): { entries: LedgerEntry[]; truncated: boolean } {
     return this.ledger.query(options)
   }

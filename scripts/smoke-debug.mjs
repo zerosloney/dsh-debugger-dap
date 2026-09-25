@@ -1,4 +1,4 @@
-// 复刻 smoke.test.mjs 逻辑（带逐步日志），独立运行以定位挂点。
+// Replica of smoke.test.mjs (with step logging), run standalone to locate hangs.
 import { existsSync } from 'node:fs'
 import { DebugSessionManager } from '../lib/session.js'
 import { spawnAdapter } from '../lib/connection.js'

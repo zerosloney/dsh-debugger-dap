@@ -4,6 +4,7 @@
  * with actionable install hints. js-debug is intentionally config-only:
  * it ships as a TCP DAP server script rather than a PATH command.
  */
+import { type InstallDeps } from './install.js';
 /** One launchable adapter command line. */
 export interface AdapterSpec {
     command: string;
@@ -29,7 +30,7 @@ export interface AdapterSpec {
     host?: string;
     /** Target port for `'tcp'` transport. */
     port?: number;
-    /** Regex (string or RegExp) matching the adapter's port announcement on stdout, one capture group for the port. Used when the TCP port is discovered. */
+    /** Regex (string or RegExp) matching the adapter's port announcement: the last capture group is the port; with two groups the first is the announced host. Used when the TCP port is discovered. */
     portPattern?: string | RegExp;
     /** Which child stream carries the port announcement: `'stdout'`, `'stderr'`, or `'both'` (default `'both'`). */
     announceStream?: 'stdout' | 'stderr' | 'both';
@@ -42,13 +43,18 @@ export interface AdapterConfigEntry {
     cwd?: string;
     /** Extra per-adapter fields spread into the DAP `launch` request body. */
     launchArgs?: Record<string, unknown>;
+    /**
+     * `launch` field that carries the stop-on-entry control (default
+     * 'stopOnEntry'; netcoredbg-style adapters use 'stopAtEntry').
+     */
+    stopOnEntryKey?: string;
     /** Transport layer: 'stdio' (default) or 'tcp'. */
     transport?: 'stdio' | 'tcp';
     /** TCP connect host (default '127.0.0.1'). Used when transport is 'tcp'. */
     connectHost?: string;
     /** TCP connect port. Required when transport is 'tcp'. */
     connectPort?: number;
-    /** Regex (string) matching the adapter's port announcement on stdout, one capture group for the port. Used when transport is 'tcp' without connectPort. */
+    /** Regex (string) matching the adapter's port announcement: the last capture group is the port; with two groups the first is the announced host. Used when transport is 'tcp' without connectPort. */
     portPattern?: string;
     /** Which child stream carries the port announcement: 'stdout', 'stderr', or 'both' (default 'both'). */
     announceStream?: 'stdout' | 'stderr' | 'both';
@@ -76,7 +82,8 @@ export interface AdapterRecipe {
     configOverride?: AdapterConfigEntry;
 }
 /**
- * Expand user home prefix `~` and environment variables (`%VAR%`, `${VAR}`, `$VAR`) in a path.
+ * Expand a user-home prefix (`~`) and environment variables (`%VAR%`,
+ * `${VAR}`) in a path.
  */
 export declare function expandPath(str: string): string;
 /**
@@ -84,6 +91,14 @@ export declare function expandPath(str: string): string;
  * Automatically probes standard extension root directories across platforms and selects the newest installed version.
  */
 export declare function findVsCodeExtensionEntry(extensionPrefix: string, relativeCandidates: readonly string[]): string | undefined;
+/**
+ * Port announcement pattern for js-debug's dapDebugServer: it prints
+ * "Debug server listening at ::1:8123" (host may be an IPv6 loopback,
+ * port last) rather than codelldb's "Listening on port N". Capture
+ * group 1 is the host, group 2 the port (the port is always the last
+ * group).
+ */
+export declare const JS_DEBUG_PORT_PATTERN = "[Dd]ebug server listening at:?\\s+(.*):(\\d+)";
 /** Failed adapter resolution with the actionable message to surface. */
 export declare class AdapterUnavailableError extends Error {
     constructor(message: string);
@@ -93,9 +108,29 @@ export declare function resolveAdapter(options: {
     adapter?: string;
     program: string;
 }, adapterConfig: Record<string, AdapterConfigEntry> | undefined, commandExists?: (command: string) => boolean, findExtension?: (prefix: string, relativeCandidates: readonly string[]) => string | undefined): AdapterSpec;
+declare function guessAdapterId(program: string): string | undefined;
+export { guessAdapterId };
+/**
+ * Wrap {@link resolveAdapter} with best-effort auto-install: when the
+ * resolver fails with {@link AdapterUnavailableError} and the wanted
+ * adapter is installable, run {@link installAdapter} once, then resolve
+ * again. Install failures surface as an AdapterUnavailableError combining
+ * the original hint and the install output tail.
+ */
+export declare function createAutoInstallingResolver(adapterConfig: Record<string, AdapterConfigEntry> | undefined, options: {
+    autoInstall: boolean;
+    installTimeoutMs?: number;
+    installDeps?: InstallDeps;
+    commandExists?: (command: string) => boolean;
+}): (resolveOptions: {
+    adapter?: string;
+    program: string;
+}) => Promise<AdapterSpec>;
 /**
  * Default PATH probe. Absolute paths are checked directly; bare names are
- * probed against every PATH directory with the platform executable suffixes.
+ * probed against every PATH directory plus the plugin-managed adapter
+ * directories (see {@link managedBinDirs}) with the platform executable
+ * suffixes.
  */
 export declare function defaultCommandExists(command: string): boolean;
 /**

@@ -1,22 +1,24 @@
 /**
  * The model-facing `debug` tool: one tool, one discriminating `action`
- * parameter, twenty-nine actions covering launch, breakpoints, stepping,
- * inspection, runtime mutation, output capture, and teardown.
+ * parameter covering launch, breakpoints, stepping, inspection, runtime
+ * mutation, output capture, and teardown.
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { LedgerKind } from './ledger.js'
+import { LEDGER_KINDS, type LedgerKind } from './ledger.js'
 import {
   DebugError,
   DebugSessionManager,
   type SessionLimits,
 } from './session.js'
 import { renderDebugText, type DebugToolValue } from './format.js'
-import { resolveLaunchConfig, runPreLaunchTask } from './adapters.js'
+import { resolveLaunchConfig, runPreLaunchTask, type ResolvedVsCodeLaunch } from './adapters.js'
+import { DEFAULT_INSTALL_TIMEOUT_MS, installAdapter, INSTALLABLE_ADAPTERS } from './install.js'
 
 export const DEBUG_ACTIONS = [
   'launch',
   'attach',
+  'install_adapter',
   'set_breakpoints',
   'set_function_breakpoints',
   'set_exception_breakpoints',
@@ -107,12 +109,12 @@ const debugParameters = {
     required: true,
     enum: DEBUG_ACTIONS,
     description:
-      'Debug operation. launch: start a program under a DAP adapter (default stops at entry). attach: attach to an already-running process by pid. set_breakpoints: replace one file breakpoint set. set_function_breakpoints: set breakpoints on function names. set_exception_breakpoints: choose which exceptions break. set_data_breakpoints / data_breakpoint_info: manage data breakpoints / watchpoints. continue/step_in/step_over/step_out/step_back/reverse_continue/pause: resume/step execution (waits for the next stop). threads/select_thread/stack_trace/scopes/variables/evaluate/exception_info: inspect state. disassemble/read_memory/completions: inspect disassembly, raw memory, and REPL completions. set_variable/set_expression: mutate state at the current frame. goto_targets/goto/restart_frame: non-sequential control flow. add_watch/remove_watch/list_watches: watch expressions evaluated on stop. source/loaded_sources/modules: inspect source files and modules. output: read captured program output. restart: restart execution. terminate/disconnect: end debuggee / session. sessions/ledger: list sessions and audit history.',
+      'Debug operation. launch: start a program under a DAP adapter (default stops at entry). attach: attach to an already-running process by pid. install_adapter: install a missing adapter (debugpy via pip, dlv via go, netcoredbg from GitHub releases). set_breakpoints: replace one file breakpoint set. set_function_breakpoints: set breakpoints on function names. set_exception_breakpoints: choose which exceptions break. set_data_breakpoints / data_breakpoint_info: manage data breakpoints / watchpoints. continue/step_in/step_over/step_out/step_back/reverse_continue/pause: resume/step execution (waits for the next stop). threads/select_thread/stack_trace/scopes/variables/evaluate/exception_info: inspect state. disassemble/read_memory/completions: inspect disassembly, raw memory, and REPL completions. set_variable/set_expression: mutate state at the current frame. goto_targets/goto/restart_frame: non-sequential control flow. add_watch/remove_watch/list_watches: watch expressions evaluated on stop. source/loaded_sources/modules: inspect source files and modules. output: read captured program output. restart: restart execution. terminate/disconnect: end debuggee / session. sessions/ledger: list sessions and audit history.',
   },
   session_id: { type: 'string', description: 'Explicit session id; defaults to your most recent launch.' },
   adapter: {
     type: 'string',
-    description: "Adapter id for launch: 'debugpy' (Python), 'dlv' (Go), 'netcoredbg' (.NET), or a config-declared id. Guessed from the program extension when omitted; required for attach (cannot guess from a pid).",
+    description: "Adapter id for launch: 'debugpy' (Python), 'dlv' (Go), 'netcoredbg' (.NET), or a config-declared id. Guessed from the program extension when omitted; required for attach (cannot guess from a pid). Also selects which adapter install_adapter installs (debugpy/dlv/netcoredbg).",
   },
   program: { type: 'string', description: 'Program path for launch (a .py/.go source, a .NET dll/exe, or whatever the adapter launches). Optional if launch_config or .vscode/launch.json is present.' },
   launch_config: { type: 'string', description: 'Name of the configuration in .vscode/launch.json to launch (e.g. "Python: Current File" or "Debug App"). When program is omitted, defaults to the first configuration in launch.json.' },
@@ -142,7 +144,7 @@ const debugParameters = {
   offset: { type: 'number', description: 'Char offset where the output action starts reading.' },
   max_chars: { type: 'number', description: 'Maximum chars the output action returns (default 4000).' },
   start: { type: 'number', description: 'First entry for variables/modules paging (0-based).' },
-  count: { type: 'number', description: 'Number of entries for variables/modules paging; variables defaults to the session limit.' },
+  count: { type: 'number', description: 'Number of entries for variables/modules paging (variables defaults to the session limit); bytes for read_memory (default 64, max 65536).' },
   terminate_debuggee: { type: 'boolean', description: 'Also kill the debuggee process on disconnect (default true).' },
   target_line: { type: 'number', description: 'Source line for goto_targets.' },
   target_id: { type: 'number', description: 'Target id for goto/restart_frame.' },
@@ -158,7 +160,7 @@ const debugParameters = {
   hex: { type: 'boolean', description: 'Format numbers / variable values as hexadecimal.' },
   filter: { type: 'string', enum: ['indexed', 'named'], description: 'Filter variable properties: "indexed" for arrays, "named" for fields.' },
   memory_reference: { type: 'string', description: 'Memory reference / hex pointer address for disassemble and read_memory.' },
-  instruction_count: { type: 'number', description: 'Number of instructions to disassemble (default 20).' },
+  instruction_count: { type: 'number', description: 'Number of instructions to disassemble (default 20, max 2000).' },
   instruction_offset: { type: 'number', description: 'Instruction offset for disassemble.' },
   resolve_symbols: { type: 'boolean', description: 'Resolve function and label symbols in disassemble (default true).' },
   text: { type: 'string', description: 'Prefix text to complete for completions.' },
@@ -175,6 +177,9 @@ const debugOutputSchema = {
     snapshot: { type: 'json' },
     state: { type: 'string', enum: ['stopped', 'running', 'terminated'] },
     timed_out: { type: 'boolean' },
+    adapter: { type: 'string' },
+    already_installed: { type: 'boolean' },
+    command: { type: 'string' },
     file: { type: 'string' },
     breakpoints: { type: 'json' },
     frames: { type: 'json' },
@@ -282,9 +287,10 @@ export async function runDebugAction(
       let env: Record<string, string> | undefined
       let extraLaunchArgs: Record<string, unknown> | undefined
       let preLaunchTask: string | undefined
+      let resolved: ResolvedVsCodeLaunch | undefined
 
       if (args.launch_config !== undefined || program === undefined || program.length === 0) {
-        const resolved = resolveLaunchConfig({
+        resolved = resolveLaunchConfig({
           workspaceDir: cwd ?? process.cwd(),
           launchConfigName: args.launch_config,
           program,
@@ -308,6 +314,37 @@ export async function runDebugAction(
           const msg = error instanceof Error ? error.message : String(error)
           throw new DebugError('adapter_error', msg)
         }
+      }
+
+      // An attach-type launch.json configuration routes to attach
+      // semantics: launching it would fail on the missing program or send
+      // the wrong request type for a foreign pid.
+      if (resolved?.request === 'attach') {
+        if (resolved.processId === undefined) {
+          throw new DebugError(
+            'invalid_arguments',
+            `Configuration '${resolved.name}' is an attach configuration but carries no usable processId (VS Code command placeholders cannot be resolved). Pass process_id and use action "attach".`,
+          )
+        }
+        if (adapterId === undefined || adapterId.length === 0) {
+          throw new DebugError(
+            'invalid_arguments',
+            `Attach configuration '${resolved.name}' needs a resolvable 'type' in .vscode/launch.json, or pass 'adapter'.`,
+          )
+        }
+        const snapshot = await manager.attach(
+          owner,
+          {
+            adapterId,
+            program,
+            processId: resolved.processId,
+            args: launchArgs,
+            cwd,
+            stopOnEntry,
+          },
+          signal,
+        )
+        return { action: 'attach', session_id: snapshot.id, snapshot }
       }
 
       if (program === undefined || program.length === 0) {
@@ -349,6 +386,29 @@ export async function runDebugAction(
         signal,
       )
       return { action: 'attach', session_id: snapshot.id, snapshot }
+    }
+    case 'install_adapter': {
+      if (args.adapter === undefined || args.adapter.length === 0) {
+        throw new DebugError('invalid_arguments', `action 'install_adapter' requires 'adapter' (${INSTALLABLE_ADAPTERS.join(', ')}).`)
+      }
+      if (!(INSTALLABLE_ADAPTERS as readonly string[]).includes(args.adapter)) {
+        throw new DebugError(
+          'invalid_arguments',
+          `Adapter '${args.adapter}' cannot be auto-installed. Supported: ${INSTALLABLE_ADAPTERS.join(', ')}; declare others in the 'adapters' plugin config instead.`,
+        )
+      }
+      // No session needed: this is machine-level setup. Errors carry the
+      // bounded install output tail for self-healing.
+      const outcome = await installAdapter(args.adapter, {
+        timeoutMs: limits.installTimeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS,
+      })
+      return {
+        action: 'install_adapter',
+        adapter: outcome.adapter,
+        already_installed: outcome.alreadyInstalled,
+        command: outcome.command,
+        content: outcome.output,
+      }
     }
     case 'set_breakpoints': {
       if (args.file === undefined || args.file.length === 0) {
@@ -643,7 +703,19 @@ export async function runDebugAction(
       return { action: 'sessions', sessions: manager.list(owner) }
     }
     case 'ledger': {
-      const kinds = args.ledger_kinds === undefined ? undefined : (args.ledger_kinds.split(',').map(kind => kind.trim()).filter(kind => kind.length > 0) as LedgerKind[])
+      let kinds: LedgerKind[] | undefined
+      if (args.ledger_kinds !== undefined) {
+        const requested = args.ledger_kinds.split(',').map(kind => kind.trim()).filter(kind => kind.length > 0)
+        const valid = new Set<string>(LEDGER_KINDS)
+        const invalid = requested.filter(kind => !valid.has(kind))
+        if (invalid.length > 0) {
+          throw new DebugError(
+            'invalid_arguments',
+            `Unknown ledger kind(s): ${invalid.join(', ')}. Valid kinds: ${LEDGER_KINDS.join(', ')}.`,
+          )
+        }
+        kinds = requested.length > 0 ? (requested as LedgerKind[]) : undefined
+      }
       const result = manager.ledgerQuery({
         sessionId: args.session_id,
         kinds,
@@ -749,7 +821,7 @@ export async function runDebugAction(
       const session = manager.sessionFor(owner, args.session_id)
       const instructions = await session.disassemble(
         args.memory_reference,
-        args.instruction_count ?? 20,
+        Math.max(1, Math.min(args.instruction_count ?? 20, 2000)),
         {
           offset: args.offset,
           instructionOffset: args.instruction_offset,
@@ -777,7 +849,7 @@ export async function runDebugAction(
         throw new DebugError('invalid_arguments', "action 'read_memory' requires 'memory_reference'.")
       }
       const session = manager.sessionFor(owner, args.session_id)
-      const mem = await session.readMemory(args.memory_reference, args.count ?? 64, args.offset, signal)
+      const mem = await session.readMemory(args.memory_reference, Math.max(1, Math.min(args.count ?? 64, 65536)), args.offset, signal)
       return {
         action: 'read_memory',
         session_id: session.id,

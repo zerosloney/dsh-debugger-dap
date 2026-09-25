@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   resolveAdapter,
+  defaultCommandExists,
   expandPath,
   stripJsonComments,
   resolveVsCodeVariables,
@@ -413,3 +414,100 @@ test('resolveLaunchConfig extracts preLaunchTask and integrates with launch.json
   }
 })
 
+
+test('js-debug auto-discovery spec carries a pattern matching dapDebugServer announcements', () => {
+  const spec = resolveAdapter(
+    { adapter: 'js-debug', program: '/w/x' },
+    undefined,
+    () => true,
+    (_prefix, candidates) => `/fake/ext/${candidates[0]}`,
+  )
+  assert.equal(spec.command, 'node')
+  assert.equal(spec.transport, 'tcp')
+  assert.ok(spec.portPattern !== undefined, 'js-debug discovery needs an explicit portPattern')
+  const pattern = new RegExp(spec.portPattern)
+  // dapDebugServer binds an IPv6 loopback by default and prints the host;
+  // the port is the last capture group, the host the one before it.
+  const v6 = pattern.exec('Debug server listening at ::1:8123')
+  assert.equal(v6?.[2], '8123')
+  assert.equal(v6?.[1], '::1')
+  const v4 = pattern.exec('Debug server listening at: 127.0.0.1:9229')
+  assert.equal(v4?.[2], '9229')
+  assert.equal(v4?.[1], '127.0.0.1')
+})
+
+test('a config-declared adapter can override the stop-on-entry launch field', () => {
+  const custom = resolveAdapter(
+    { adapter: 'mydbg', program: '/w/x' },
+    { mydbg: { command: 'mydbg', stopOnEntryKey: 'stopAtEntry' } },
+    () => false,
+  )
+  assert.equal(custom.stopOnEntryKey, 'stopAtEntry')
+})
+
+test('defaultCommandExists probes the managed adapter dirs', async () => {
+  const { addManagedBinDir, resetManagedBinDirs } = await import('../lib/install.js')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-dap-managedprobe-'))
+  try {
+    const exe = process.platform === 'win32' ? 'zz-managed-cmd.exe' : 'zz-managed-cmd'
+    writeFileSync(join(dir, exe), '')
+    addManagedBinDir(dir)
+    assert.equal(defaultCommandExists('zz-managed-cmd'), true)
+    assert.equal(defaultCommandExists('zz-managed-cmd-absent'), false)
+  } finally {
+    resetManagedBinDirs()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('createAutoInstallingResolver installs once and re-resolves', async () => {
+  const { createAutoInstallingResolver } = await import('../lib/adapters.js')
+  // python appears on PATH only after the (stubbed) install ran.
+  let pythonAvailable = false
+  const installDeps = {
+    runCommand: async () => {
+      pythonAvailable = true
+      return { code: 0, output: '' }
+    },
+  }
+  const resolver = createAutoInstallingResolver(undefined, {
+    autoInstall: true,
+    installDeps,
+    commandExists: () => pythonAvailable,
+  })
+  const spec = await resolver({ program: '/w/app.py' })
+  assert.equal(spec.command, 'python')
+  assert.deepEqual(spec.args, ['-m', 'debugpy.adapter'])
+})
+
+test('createAutoInstallingResolver honors the off switch', async () => {
+  const { createAutoInstallingResolver, AdapterUnavailableError } = await import('../lib/adapters.js')
+  let installRan = false
+  const resolver = createAutoInstallingResolver(undefined, {
+    autoInstall: false,
+    installDeps: {
+      runCommand: async () => {
+        installRan = true
+        return { code: 0, output: '' }
+      },
+    },
+    commandExists: () => false,
+  })
+  await assert.rejects(resolver({ program: '/w/app.py' }), AdapterUnavailableError)
+  assert.equal(installRan, false)
+})
+
+test('createAutoInstallingResolver folds install failures into the hint', async () => {
+  const { createAutoInstallingResolver } = await import('../lib/adapters.js')
+  const resolver = createAutoInstallingResolver(undefined, {
+    autoInstall: true,
+    installDeps: {
+      runCommand: async () => ({ code: 1, output: 'pip exploded' }),
+    },
+    commandExists: () => false,
+  })
+  await assert.rejects(
+    resolver({ program: '/w/app.py' }),
+    error => /pip install debugpy failed/.test(error.message) && /Auto-install of 'debugpy' failed/.test(error.message),
+  )
+})

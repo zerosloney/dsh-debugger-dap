@@ -11,9 +11,11 @@ import { encodeMessage, MessageDecoder } from '../lib/framing.js'
 /** Build the standard happy-path script every test can extend or override. */
 export function standardScript(overrides = {}) {
   return {
+    // Per the DAP spec the initialize response body IS the capabilities
+    // object (top-level fields) — mirror the real wire format.
     initialize: (server, request) =>
       server.respond(request.seq, 'initialize', {
-        capabilities: { supportsConfigurationDoneRequest: true },
+        supportsConfigurationDoneRequest: true,
       }),
     launch: (server, request) => {
       server.respond(request.seq, 'launch')

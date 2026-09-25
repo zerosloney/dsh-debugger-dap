@@ -266,14 +266,12 @@ test('snapshot carries the adapter capabilities for model decisions', async () =
   const script = standardScript({
     initialize: (server, request) =>
       server.respond(request.seq, 'initialize', {
-        capabilities: {
-          supportsConfigurationDoneRequest: true,
+        supportsConfigurationDoneRequest: true,
           supportsSetVariable: true,
           supportsDataBreakpoints: true,
           supportsGotoTargetsRequest: true,
           supportsLoadedSourcesRequest: true,
-        },
-      }),
+        }),
   })
   const { manager } = buildManager(script)
   const owner = {}
@@ -334,8 +332,8 @@ test('variables and modules support start/count paging', async () => {
   const script = standardScript({
     initialize: (server, request) =>
       server.respond(request.seq, 'initialize', {
-        capabilities: { supportsConfigurationDoneRequest: true, supportsModulesRequest: true },
-      }),
+        supportsConfigurationDoneRequest: true, supportsModulesRequest: true,
+        }),
     variables: (server, request, args) => {
       // Like a real adapter, honor start/count on the response side.
       const start = args.start ?? 0
@@ -477,16 +475,14 @@ test('runDebugAction drives reverse_continue, terminate, and extended inspection
   const script = standardScript({
     initialize: (server, request) =>
       server.respond(request.seq, 'initialize', {
-        capabilities: {
-          supportsConfigurationDoneRequest: true,
+        supportsConfigurationDoneRequest: true,
           supportsStepBack: true,
           supportsDataBreakpoints: true,
           supportsDisassembleRequest: true,
           supportsReadMemoryRequest: true,
           supportsCompletionsRequest: true,
           supportsTerminateRequest: true,
-        },
-      }),
+        }),
     reverseContinue: (server, request) => {
       server.respond(request.seq, 'reverseContinue')
       server.emit('stopped', { reason: 'step', threadId: 1 })
@@ -645,3 +641,98 @@ test('launch action executes preLaunchTask from .vscode/tasks.json before starti
   }
 })
 
+
+test('launch.json attach configuration routes to attach semantics', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'dsh-dap-attach-'))
+  try {
+    mkdirSync(join(tmpDir, '.vscode'), { recursive: true })
+    writeFileSync(
+      join(tmpDir, '.vscode', 'launch.json'),
+      JSON.stringify({
+        configurations: [{ name: 'Attach to Python', type: 'python', request: 'attach', processId: 4242 }],
+      }),
+    )
+    const { manager, fake } = buildManager(
+      standardScript({
+        attach: (server, request) => {
+          server.respond(request.seq, 'attach')
+          server.emit('initialized')
+        },
+      }),
+    )
+    const owner = {}
+    const result = await runDebugAction(owner, { action: 'launch', cwd: tmpDir }, manager, testLimits)
+    assert.equal(result.action, 'attach')
+    assert.equal(result.snapshot?.status, 'running')
+    const attachRequest = fake.server.received.find(message => message.command === 'attach')
+    assert.equal(attachRequest?.arguments?.processId, 4242)
+    await manager.disposeAll()
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('launch.json attach configuration without a usable processId is a clear error', async () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'dsh-dap-attach-'))
+  try {
+    mkdirSync(join(tmpDir, '.vscode'), { recursive: true })
+    writeFileSync(
+      join(tmpDir, '.vscode', 'launch.json'),
+      JSON.stringify({
+        configurations: [{ name: 'Attach', type: 'python', request: 'attach', processId: '${command:PickProcess}' }],
+      }),
+    )
+    const { manager } = buildManager(standardScript())
+    await assert.rejects(
+      runDebugAction({}, { action: 'launch', cwd: tmpDir }, manager, testLimits),
+      /is an attach configuration but carries no usable processId/,
+    )
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('ledger rejects unknown kinds and lists the valid ones', async () => {
+  const { manager } = buildManager(standardScript())
+  await assert.rejects(
+    runDebugAction({}, { action: 'ledger', ledger_kinds: 'breakpoint' }, manager, testLimits),
+    error => error instanceof DebugError && error.code === 'invalid_arguments' && /breakpoint_hit/.test(error.message),
+  )
+})
+
+test('read_memory clamps an oversized byte count', async () => {
+  const { manager, fake } = buildManager(
+    standardScript({
+      initialize: (server, request) =>
+        server.respond(request.seq, 'initialize', {
+          supportsConfigurationDoneRequest: true, supportsReadMemoryRequest: true,
+          }),
+      readMemory: (server, request) =>
+        server.respond(request.seq, 'readMemory', { address: '0x1000', data: Buffer.from([1, 2, 3]).toString('base64') }),
+    }),
+  )
+  const owner = {}
+  await runDebugAction(owner, { action: 'launch', program: '/w/app.py' }, manager, testLimits)
+  const result = await runDebugAction(
+    owner,
+    { action: 'read_memory', memory_reference: '0x1000', count: 1e9 },
+    manager,
+    testLimits,
+  )
+  assert.equal(result.memory?.data, Buffer.from([1, 2, 3]).toString('base64'))
+  const request = fake.server.received.find(message => message.command === 'readMemory')
+  assert.equal(request?.arguments?.count, 65536)
+  await manager.disposeAll()
+})
+
+test('install_adapter validates its adapter argument', async () => {
+  const { manager } = buildManager(standardScript())
+  await assert.rejects(
+    runDebugAction({}, { action: 'install_adapter' }, manager, testLimits),
+    error => error instanceof DebugError && error.code === 'invalid_arguments' && /debugpy/.test(error.message),
+  )
+  await assert.rejects(
+    runDebugAction({}, { action: 'install_adapter', adapter: 'gdb' }, manager, testLimits),
+    error => error instanceof DebugError && error.code === 'invalid_arguments' && /declare others in the 'adapters' plugin config/.test(error.message),
+  )
+})

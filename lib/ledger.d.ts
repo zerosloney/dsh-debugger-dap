@@ -1,41 +1,44 @@
 /**
- * 调试会话台账（Debug Ledger）：把每次调试会话的关键事件追加到
- * 持久化 JSONL 文件，并提供进程内查询，便于问题回溯。
+ * Debug session ledger: appends one JSON line per key debug event to a
+ * persistent JSONL file and serves in-process queries for later forensics.
  *
- * 记录的事件种类（LedgerKind）：
- *  - session_start    会话创建（launch/attach、适配器、程序、cwd）
- *  - session_end      会话结束（disconnect / 适配器关闭 / debuggee 退出）
- *  - breakpoints_set  断点设置（文件 + 行号 + 命中验证数）
- *  - breakpoint_hit   断点命中（reason=breakpoint，尽力附加顶层帧位置）
- *  - exception        异常停机（reason=exception，尽力附加位置与描述）
- *  - stop             其它停机（step/pause/entry 等）
- *  - request_error    模型动作失败（稳定错误码 + 消息）
+ * Event kinds (LedgerKind):
+ *  - session_start    session created (launch/attach, adapter, program, cwd)
+ *  - session_end      session ended (disconnect / adapter close / debuggee exit)
+ *  - breakpoints_set  breakpoints configured (file + lines + verified count)
+ *  - breakpoint_hit   breakpoint reached (reason=breakpoint, best-effort top-frame location)
+ *  - exception        exception stop (reason=exception, best-effort location/description)
+ *  - stop             any other stop (step/pause/entry, ...)
+ *  - request_error    model action failed (stable error code + message)
  *
- * 设计约束：台账是尽力而为（best-effort）的旁路设施——写入失败绝不
- * 影响调试主流程，只累计 writeFailureCount 供诊断。
+ * Design constraint: the ledger is a best-effort side channel — write
+ * failures never affect the debug flow itself; only writeFailureCount
+ * accumulates for diagnostics.
  */
-/** 默认台账路径：~/.dsh-debugger-dap/ledger.jsonl */
+/** Default ledger path: ~/.dsh-debugger-dap/ledger.jsonl */
 export declare const DEFAULT_LEDGER_PATH: string;
 export type LedgerKind = 'session_start' | 'session_end' | 'breakpoints_set' | 'breakpoint_hit' | 'exception' | 'stop' | 'request_error';
-/** 一条台账记录（JSON 安全，可整行写入 JSONL）。 */
+/** Every ledger event kind (single source of truth for argument validation and docs). */
+export declare const LEDGER_KINDS: readonly ["session_start", "session_end", "breakpoints_set", "breakpoint_hit", "exception", "stop", "request_error"];
+/** One ledger record (JSON-safe; written as one JSONL line). */
 export interface LedgerEntry {
-    /** 进程内单调序号，也即写盘顺序。 */
+    /** In-process monotonic sequence; also the disk write order. */
     readonly seq: number;
-    /** ISO-8601 时间戳。 */
+    /** ISO-8601 timestamp. */
     readonly ts: string;
-    /** 所属会话 id；请求级错误无会话时为空。 */
+    /** Owning session id; undefined for request-level errors with no session. */
     readonly sessionId: string | undefined;
     readonly kind: LedgerKind;
     readonly detail: Record<string, unknown>;
 }
 export interface LedgerQuery {
-    /** 只查某会话；缺省查全部。 */
+    /** Restrict to one session; default: all sessions. */
     sessionId?: string;
-    /** 只查某些种类；空数组/缺省查全部。 */
+    /** Restrict to these kinds; empty/absent: all kinds. */
     kinds?: readonly LedgerKind[];
-    /** 只查 ts >= since 的条目（ISO-8601 字符串比较）。 */
+    /** Only entries with ts >= since (ISO-8601 string comparison). */
     since?: string;
-    /** 返回条数上限（默认 50，最大 500），取最新 N 条。 */
+    /** Max entries returned (default 50, max 500); the newest N are kept. */
     limit?: number;
 }
 export declare class DebugLedger {
@@ -44,19 +47,21 @@ export declare class DebugLedger {
     private readonly entries;
     private seq;
     private writeErrors;
+    /** The directory only needs creating once; reset on write failure so the next record retries. */
+    private dirEnsured;
     private constructor();
-    /** 创建台账；path 为空时使用默认路径，目录自动创建。 */
+    /** Create the ledger; an empty path uses the default, the directory is created on first write. */
     static create(options?: {
         path?: string;
         maxFileBytes?: number;
     }): DebugLedger;
-    /** JSONL 文件路径（可人工查阅/归档）。 */
+    /** JSONL file path (human-readable / archivable). */
     get path(): string;
-    /** 写盘失败的累计次数（0 = 全部成功）。 */
+    /** Cumulative disk-write failures (0 = all succeeded). */
     get writeFailureCount(): number;
-    /** 追加一条记录：内存环形缓冲 + JSONL 追加写（同步、尽力而为）。 */
+    /** Append one record: in-memory ring buffer + JSONL append (synchronous, best-effort). */
     record(sessionId: string | undefined, kind: LedgerKind, detail?: Record<string, unknown>): void;
-    /** 查询最新条目（按 seq 升序返回尾部 slice）。 */
+    /** Query the newest entries (returns the ascending-seq tail slice). */
     query(options?: LedgerQuery): {
         entries: LedgerEntry[];
         truncated: boolean;

@@ -35,16 +35,12 @@ export declare class DapConnection {
     private readonly requestTimeoutMs;
     private closed;
     private closeReason;
-    private lastResponseAt;
-    private stalled;
     constructor(transport: DapTransport, options?: {
         requestTimeoutMs?: number;
         maxBodyBytes?: number;
     });
     /** Whether the adapter connection has closed; further sends reject. */
     get isClosed(): boolean;
-    /** Whether the adapter stopped responding entirely (likely hung). */
-    get isStalled(): boolean;
     /**
      * Send one request and resolve with the success body. Rejects with
      * {@link DapRequestError} on a DAP failure, {@link DapDisconnectedError}
@@ -170,7 +166,7 @@ export interface TcpDiscoveryOptions {
     requestTimeoutMs?: number;
     maxBodyBytes?: number;
     signal?: AbortSignal;
-    /** Regex (string or RegExp) matching the adapter's port announcement, with one capture group for the port. Default: /Listening on port (\d+)/. */
+    /** Regex (string or RegExp) matching the adapter's port announcement: the last capture group is the port; with two groups the first is the announced host. Default: /Listening on port (\d+)/. */
     portPattern?: string | RegExp;
     /** Which child stream(s) carry the port announcement (default `'both'`; `'stdout'` pins the old behavior). */
     announceStream?: 'stdout' | 'stderr' | 'both';

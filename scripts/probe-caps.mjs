@@ -1,4 +1,4 @@
-// 探针：打印 debugpy initialize 完整能力（找 exceptionBreakpointFilters）。
+// Probe: print debugpy's full initialize capabilities (looking for exceptionBreakpointFilters).
 import { spawnAdapter } from '../lib/connection.js'
 
 const spawned = spawnAdapter(

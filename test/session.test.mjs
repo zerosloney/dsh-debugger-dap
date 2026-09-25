@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { DebugSessionManager, DebugError } from '../lib/session.js'
+import { DebugLedger } from '../lib/ledger.js'
 import { createFakeAdapter, standardScript, testLimits } from '../helpers/fake-adapter.mjs'
 
 function buildManager(script, limits = testLimits) {
@@ -205,8 +209,8 @@ test('adapter-rejected restart restores the pre-restart location and thread', as
   const script = standardScript({
     initialize: (server, request) =>
       server.respond(request.seq, 'initialize', {
-        capabilities: { supportsConfigurationDoneRequest: true, supportsRestartRequest: true },
-      }),
+        supportsConfigurationDoneRequest: true, supportsRestartRequest: true,
+        }),
     restart: (server, request) => server.fail(request.seq, 'restart', 'restart refused'),
   })
   const { manager } = buildManager(script)
@@ -545,8 +549,8 @@ test('dataBreakpointInfo and setDataBreakpoints work with adapter capabilities',
   const script = standardScript({
     initialize: (server, request) =>
       server.respond(request.seq, 'initialize', {
-        capabilities: { supportsConfigurationDoneRequest: true, supportsDataBreakpoints: true },
-      }),
+        supportsConfigurationDoneRequest: true, supportsDataBreakpoints: true,
+        }),
     dataBreakpointInfo: (server, request) =>
       server.respond(request.seq, 'dataBreakpointInfo', {
         dataId: `id_${request.arguments?.name}`,
@@ -593,8 +597,8 @@ test('gotoTargets and goto pass threadId and update location', async () => {
   const script = standardScript({
     initialize: (server, request) =>
       server.respond(request.seq, 'initialize', {
-        capabilities: { supportsConfigurationDoneRequest: true, supportsGotoTargetsRequest: true },
-      }),
+        supportsConfigurationDoneRequest: true, supportsGotoTargetsRequest: true,
+        }),
     gotoTargets: (server, request) =>
       server.respond(request.seq, 'gotoTargets', {
         targets: [{ id: 101, label: 'line 50', line: 50 }],
@@ -633,15 +637,13 @@ test('restartFrame, disassemble, readMemory, completions and terminate', async (
   const script = standardScript({
     initialize: (server, request) =>
       server.respond(request.seq, 'initialize', {
-        capabilities: {
-          supportsConfigurationDoneRequest: true,
+        supportsConfigurationDoneRequest: true,
           supportsRestartFrame: true,
           supportsDisassembleRequest: true,
           supportsReadMemoryRequest: true,
           supportsCompletionsRequest: true,
           supportsTerminateRequest: true,
-        },
-      }),
+        }),
     restartFrame: (server, request) => {
       server.respond(request.seq, 'restartFrame')
       server.emit('stopped', { reason: 'restart', threadId: 1 })
@@ -690,5 +692,68 @@ test('restartFrame, disassemble, readMemory, completions and terminate', async (
 
   const termSnap = await session.terminate()
   assert.equal(termSnap.status, 'terminated')
+  await manager.disposeAll()
+})
+
+test('terminate records exactly one session_end across the terminated event and disconnect', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-dap-ledger-'))
+  const ledger = DebugLedger.create({ path: join(dir, 'ledger.jsonl') })
+  const fake = createFakeAdapter(
+    standardScript({
+      initialize: (server, request) =>
+        server.respond(request.seq, 'initialize', {
+          supportsConfigurationDoneRequest: true, supportsTerminateRequest: true,
+          }),
+      terminate: (server, request) => {
+        server.respond(request.seq, 'terminate')
+        server.emit('terminated')
+      },
+    }),
+  )
+  const manager = new DebugSessionManager({
+    spawn: () => fake.spawned,
+    resolveAdapter: () => ({ command: 'fake', args: [] }),
+    limits: testLimits,
+    ledger,
+  })
+  const owner = {}
+  await manager.launch(owner, { program: '/w/app.py' })
+  const session = manager.sessionFor(owner)
+  await session.terminate()
+  await manager.disconnect(owner, session.id, true)
+
+  const entries = readFileSync(ledger.path, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+  const ends = entries.filter(entry => entry.kind === 'session_end')
+  assert.equal(ends.length, 1, `expected one session_end, got ${ends.length}: ${JSON.stringify(ends)}`)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('configurationDone is not sent when the adapter does not declare the capability', async () => {
+  const { manager, fake } = buildManager(
+    standardScript({
+      initialize: (server, request) => server.respond(request.seq, 'initialize', {}),
+    }),
+  )
+  const owner = {}
+  const snapshot = await manager.launch(owner, { program: '/w/app.py' })
+  assert.equal(snapshot.status, 'stopped')
+  const commands = fake.server.received.map(message => message.command)
+  assert.ok(!commands.includes('configurationDone'), 'configurationDone must be skipped for undeclared capability')
+  await manager.disposeAll()
+})
+
+test('the manager awaits an async resolveAdapter (auto-install seam)', async () => {
+  const fake = createFakeAdapter(standardScript())
+  const manager = new DebugSessionManager({
+    spawn: () => fake.spawned,
+    resolveAdapter: async () => {
+      await new Promise(resolve => setTimeout(resolve, 5))
+      return { command: 'fake', args: [] }
+    },
+    limits: testLimits,
+  })
+  const owner = {}
+  const snapshot = await manager.launch(owner, { program: '/w/app.py' })
+  assert.equal(snapshot.status, 'stopped')
   await manager.disposeAll()
 })

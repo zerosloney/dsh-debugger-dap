@@ -14,7 +14,7 @@ import { DebugSessionManager } from '../lib/session.js'
 import { spawnAdapter } from '../lib/connection.js'
 import { resolveAdapter } from '../lib/adapters.js'
 
-/** 测试用的真实 Python fixture（与 integration/smoke 共用）。 */
+/** Real Python fixture used by the tests (shared with integration/smoke). */
 function fixturePath() {
   return join(process.cwd(), 'test', 'fixtures', 'hello.py')
 }
@@ -71,8 +71,9 @@ const python = await findPythonWithDebugpy()
 test('real debugpy launch, breakpoint, continue round-trip', { skip: python === undefined ? 'debugpy not installed (pip install debugpy)' : false }, async () => {
   const manager = new DebugSessionManager({
     spawn: spec => spawnAdapter(spec, { requestTimeoutMs: 15000 }),
-    // 用真实配方解析（含 launchArgs.program 等），避免手写 spec 遗漏字段
-    // 导致 debugpy 收不到 program 而挂起（既有缺陷，2026-08-24 修复）。
+    // Resolve through the real recipe (launchArgs.program etc.): a hand-written
+    // spec could omit fields and leave debugpy hanging without a program
+    // (pre-existing flaw fixed 2026-08-24).
     resolveAdapter: () => resolveAdapter({ adapter: 'debugpy', program: fixturePath() }),
     limits: {
       requestTimeoutMs: 15000,
@@ -90,8 +91,9 @@ test('real debugpy launch, breakpoint, continue round-trip', { skip: python === 
     const snapshot = await manager.launch(owner, { program: fixture })
     assert.equal(snapshot.status, 'stopped')
     const session = manager.sessionFor(owner)
-    // 第 6 行（total = count + 41）：停在此行时 count=1 已定义，Locals 非空。
-    // 第 5 行（count = 1）在赋值前停止，Locals 为空——既有断言缺陷，2026-08-24 修复。
+    // Line 6 (total = count + 41): stopping there has count=1 defined, so
+    // Locals is non-empty. Line 5 (count = 1) stops before the assignment
+    // with empty Locals (pre-existing assertion flaw fixed 2026-08-24).
     await session.setBreakpoints(fixture, [{ line: 6 }])
     const outcome = await session.resume('continue')
     assert.equal(outcome.state, 'stopped')
@@ -103,12 +105,13 @@ test('real debugpy launch, breakpoint, continue round-trip', { skip: python === 
     const { variables } = await session.variables(scopes[0].variablesReference)
     assert.ok(variables.length > 0)
   } finally {
-    // 无论断言成败都清理：失败时也必须杀掉适配器进程，否则 node --test
-    // 会因残留子进程一直等待（既有缺陷，2026-08-24 修复）。
+    // Clean up regardless of assertion outcome: a failed run must still kill
+    // the adapter processes, or node --test waits forever on leftover
+    // children (pre-existing flaw fixed 2026-08-24).
     try {
       await manager.disconnect(owner, undefined, true)
     } catch {
-      // 已断开或从未启动
+      // already disconnected or never started
     }
     await manager.disposeAll()
   }

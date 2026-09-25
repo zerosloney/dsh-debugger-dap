@@ -1,13 +1,15 @@
 /**
- * 真实 debugpy 会话闭环验证（e2e）：对应 Goal Brief 的七条完成标准。
+ * Real debugpy closed-loop verification (e2e): mirrors the Goal Brief's
+ * seven completion criteria.
  *
- * 运行：node scripts/e2e-real.mjs（需 `pip install debugpy`）
- * 输出：分节日志 + 台账 JSONL 全文 + 进程泄漏检查；断言失败即非零退出。
+ * Run: node scripts/e2e-real.mjs (requires `pip install debugpy`)
+ * Output: per-section logs + the full ledger JSONL + a process-leak check;
+ * any assertion failure exits non-zero.
  *
- * 三个子场景（确定性顺序）：
- *   A. debuggee.py：入口 → 断点 13 → 栈/作用域/变量 → next/continue → evaluate → 断开
- *   B. debuggee.py：入口 → 断点 11 → stepIn 进入 add → stepOut 回 main → 断开
- *   C. debuggee_exc.py：入口 → 异常断点 all → 异常停机 ZeroDivisionError → 断开
+ * Three sub-scenarios (deterministic order):
+ *   A. debuggee.py: entry → breakpoint 13 → stack/scopes/variables → next/continue → evaluate → disconnect
+ *   B. debuggee.py: entry → breakpoint 11 → stepIn into add → stepOut back to main → disconnect
+ *   C. debuggee_exc.py: entry → exception breakpoint 'all' → ZeroDivisionError stop → disconnect
  */
 
 import assert from 'node:assert/strict'
@@ -34,7 +36,8 @@ const LIMITS = {
 
 function countDebugpyAdapters() {
   try {
-    // 按可执行名过滤，避免 wmic 查询串自匹配（查询串本身含 'debugpy.adapter'）。
+    // Filter by executable name: the wmic query string itself contains
+    // 'debugpy.adapter' and would otherwise self-match.
     const out = execSync(
       "wmic process where \"name='python.exe'\" get commandline /format:csv",
       { stdio: ['ignore', 'pipe', 'ignore'] },
@@ -46,7 +49,7 @@ function countDebugpyAdapters() {
 }
 
 const baselineAdapters = countDebugpyAdapters()
-console.log(`[0] debugpy.adapter 基线进程数: ${baselineAdapters}`)
+console.log(`[0] debugpy.adapter baseline process count: ${baselineAdapters}`)
 
 const manager = new DebugSessionManager({
   spawn: spec => spawnAdapter(spec, { requestTimeoutMs: 20000 }),
@@ -60,127 +63,127 @@ const fixture = join(FIXTURES, 'debuggee.py')
 
 try {
 
-// ================= 场景 A：断点 / 栈 / 变量 / 单步 / 求值 =================
-console.log('\n=== [1] launch（debugpy，stopOnEntry） ===')
+// ================= Scenario A: breakpoints / stack / variables / stepping / evaluate =================
+console.log('\n=== [1] launch (debugpy, stopOnEntry) ===')
 const snap = await manager.launch(owner, { program: fixture })
-assert.equal(snap.status, 'stopped', 'launch 后应停在入口')
-assert.equal(snap.stopReason, 'entry', '入口停止 reason 应为 entry')
-assert.ok(snap.threadId !== undefined, '入口停止应携带 threadId')
-console.log(`  通过: status=${snap.status} stopReason=${snap.stopReason} threadId=${snap.threadId}`)
+assert.equal(snap.status, 'stopped', 'launch must stop at entry')
+assert.equal(snap.stopReason, 'entry', 'entry stop reason must be "entry"')
+assert.ok(snap.threadId !== undefined, 'entry stop must carry a threadId')
+console.log(`  ok: status=${snap.status} stopReason=${snap.stopReason} threadId=${snap.threadId}`)
 
 const session = manager.sessionFor(owner)
 
-console.log('\n=== [2] 断点：line 13 命中（source + line 正确） ===')
+console.log('\n=== [2] breakpoint: line 13 hit (source + line correct) ===')
 const bps = await session.setBreakpoints(fixture, [{ line: 13 }])
-assert.ok(bps.every(bp => bp.verified), `断点应全部 verified: ${JSON.stringify(bps)}`)
+assert.ok(bps.every(bp => bp.verified), `all breakpoints must be verified: ${JSON.stringify(bps)}`)
 const hit = await session.resume('continue')
-assert.equal(hit.state, 'stopped', 'continue 应停在断点')
-assert.equal(hit.snapshot.stopReason, 'breakpoint', '停因应为 breakpoint')
-assert.equal(hit.snapshot.frame?.line, 13, `命中行应为 13，实际 ${hit.snapshot.frame?.line}`)
+assert.equal(hit.state, 'stopped', 'continue must stop at the breakpoint')
+assert.equal(hit.snapshot.stopReason, 'breakpoint', 'stop reason must be "breakpoint"')
+assert.equal(hit.snapshot.frame?.line, 13, `hit line must be 13, got ${hit.snapshot.frame?.line}`)
 assert.ok(
   hit.snapshot.frame?.path?.replaceAll('\\', '/').endsWith('test/fixtures/debuggee.py'),
-  `source 应指向被测程序，实际 ${hit.snapshot.frame?.path}`,
+  `source must point at the debuggee, got ${hit.snapshot.frame?.path}`,
 )
-console.log(`  通过: line=${hit.snapshot.frame?.line} source=${hit.snapshot.frame?.path}`)
+console.log(`  ok: line=${hit.snapshot.frame?.line} source=${hit.snapshot.frame?.path}`)
 
 console.log('\n=== [3] stackTrace / scopes / variables ===')
 const frames = await session.stackTrace(10)
-assert.ok(frames.some(frame => frame.name === 'main'), `栈中应含 main 帧: ${frames.map(f => f.name).join(',')}`)
+assert.ok(frames.some(frame => frame.name === 'main'), `stack must contain a main frame: ${frames.map(f => f.name).join(',')}`)
 const scopes = await session.scopes(frames[0].id)
-assert.ok(scopes.some(scope => scope.name === 'Locals'), `应含 Locals 作用域: ${scopes.map(s => s.name).join(',')}`)
+assert.ok(scopes.some(scope => scope.name === 'Locals'), `expected a Locals scope: ${scopes.map(s => s.name).join(',')}`)
 const { variables } = await session.variables(scopes.find(s => s.name === 'Locals').variablesReference)
 const byName = Object.fromEntries(variables.map(v => [v.name, v.value]))
-assert.equal(byName.count, '1', `count 应为 1，实际 ${byName.count}`)
-assert.equal(byName.total, '42', `total 应为 42，实际 ${byName.total}`)
-assert.equal(byName.i, '0', `i 应为 0，实际 ${byName.i}`)
-console.log(`  通过: 栈=${frames.map(f => f.name).join('>')} 变量 count=${byName.count} total=${byName.total} i=${byName.i}`)
+assert.equal(byName.count, '1', `count must be 1, got ${byName.count}`)
+assert.equal(byName.total, '42', `total must be 42, got ${byName.total}`)
+assert.equal(byName.i, '0', `i must be 0, got ${byName.i}`)
+console.log(`  ok: stack=${frames.map(f => f.name).join('>')} variables count=${byName.count} total=${byName.total} i=${byName.i}`)
 
-console.log('\n=== [4] 单步（next）与求值 ===')
+console.log('\n=== [4] stepping (next) and evaluate ===')
 const afterNext = await session.resume('next')
-assert.equal(afterNext.state, 'stopped', 'next 后应停机')
-assert.equal(afterNext.snapshot.stopReason, 'step', 'next 停因应为 step')
-assert.notEqual(afterNext.snapshot.frame?.line, 13, 'next 应离开 line 13')
+assert.equal(afterNext.state, 'stopped', 'next must stop')
+assert.equal(afterNext.snapshot.stopReason, 'step', 'next stop reason must be "step"')
+assert.notEqual(afterNext.snapshot.frame?.line, 13, 'next must leave line 13')
 console.log(`  next: line ${hit.snapshot.frame?.line} -> ${afterNext.snapshot.frame?.line} (reason=${afterNext.snapshot.stopReason})`)
 
 const again = await session.resume('continue')
 assert.equal(again.state, 'stopped')
 assert.equal(again.snapshot.stopReason, 'breakpoint')
-assert.equal(again.snapshot.frame?.line, 13, '第二次断点命中应在 line 13')
+assert.equal(again.snapshot.frame?.line, 13, 'the second breakpoint hit must be on line 13')
 const evaluation = await session.evaluate('count + 41', undefined, 'repl')
-assert.equal(evaluation.result, '42', `evaluate count+41 应为 42，实际 ${evaluation.result}`)
-console.log(`  通过: continue 再次命中 line 13；evaluate("count + 41") = ${evaluation.result}`)
+assert.equal(evaluation.result, '42', `evaluate count+41 must be 42, got ${evaluation.result}`)
+console.log(`  ok: continue hit line 13 again; evaluate("count + 41") = ${evaluation.result}`)
 
 await manager.disconnect(owner, session.id, true)
-console.log('  场景 A 断开完成')
+console.log('  scenario A disconnected')
 
-// ================= 场景 B：stepIn / stepOut =================
-console.log('\n=== [5] 单步（stepIn / stepOut，进入 add 函数） ===')
+// ================= Scenario B: stepIn / stepOut =================
+console.log('\n=== [5] stepping (stepIn / stepOut, entering add) ===')
 const snapB = await manager.launch(owner, { program: fixture })
 assert.equal(snapB.status, 'stopped')
 const sessionB = manager.sessionFor(owner)
 const bp11 = await sessionB.setBreakpoints(fixture, [{ line: 11 }])
-assert.ok(bp11[0].verified, 'line 11 断点应 verified')
+assert.ok(bp11[0].verified, 'the line 11 breakpoint must be verified')
 const toCall = await sessionB.resume('continue')
-assert.equal(toCall.snapshot.frame?.line, 11, `应停在 line 11（add 调用行），实际 ${toCall.snapshot.frame?.line}`)
+assert.equal(toCall.snapshot.frame?.line, 11, `must stop at line 11 (the add call), got ${toCall.snapshot.frame?.line}`)
 const stepIn = await sessionB.resume('stepIn')
 assert.equal(stepIn.state, 'stopped')
-assert.equal(stepIn.snapshot.frame?.name, 'add', `stepIn 应进入 add 帧，实际 ${stepIn.snapshot.frame?.name}`)
-assert.equal(stepIn.snapshot.frame?.line, 5, `stepIn 应停在 add 第 5 行，实际 ${stepIn.snapshot.frame?.line}`)
-console.log(`  stepIn: 进入 ${stepIn.snapshot.frame?.name}@line ${stepIn.snapshot.frame?.line}`)
+assert.equal(stepIn.snapshot.frame?.name, 'add', `stepIn must enter the add frame, got ${stepIn.snapshot.frame?.name}`)
+assert.equal(stepIn.snapshot.frame?.line, 5, `stepIn must stop at line 5 of add, got ${stepIn.snapshot.frame?.line}`)
+console.log(`  stepIn: entered ${stepIn.snapshot.frame?.name}@line ${stepIn.snapshot.frame?.line}`)
 const stepOut = await sessionB.resume('stepOut')
 assert.equal(stepOut.state, 'stopped')
-assert.equal(stepOut.snapshot.frame?.name, 'main', `stepOut 应回到 main 帧，实际 ${stepOut.snapshot.frame?.name}`)
-console.log(`  stepOut: 回到 ${stepOut.snapshot.frame?.name}@line ${stepOut.snapshot.frame?.line}`)
+assert.equal(stepOut.snapshot.frame?.name, 'main', `stepOut must return to the main frame, got ${stepOut.snapshot.frame?.name}`)
+console.log(`  stepOut: back in ${stepOut.snapshot.frame?.name}@line ${stepOut.snapshot.frame?.line}`)
 await manager.disconnect(owner, sessionB.id, true)
-console.log('  场景 B 断开完成')
+console.log('  scenario B disconnected')
 
-// ================= 场景 C：异常中断 =================
-console.log('\n=== [6] 异常断点（debuggee_exc.py） ===')
+// ================= Scenario C: exception break =================
+console.log('\n=== [6] exception breakpoints (debuggee_exc.py) ===')
 const excFixture = join(FIXTURES, 'debuggee_exc.py')
 const excSnap = await manager.launch(owner, { program: excFixture })
-assert.equal(excSnap.status, 'stopped', '异常场景从入口停止开始')
+assert.equal(excSnap.status, 'stopped', 'the exception scenario starts stopped at entry')
 const excSession = manager.sessionFor(owner)
 await excSession.setExceptionBreakpoints(['all'], undefined)
 const excHit = await excSession.resume('continue')
-assert.equal(excHit.state, 'stopped', '异常应导致停机')
-assert.equal(excHit.snapshot.stopReason, 'exception', '停因应为 exception')
+assert.equal(excHit.state, 'stopped', 'the exception must stop the program')
+assert.equal(excHit.snapshot.stopReason, 'exception', 'stop reason must be "exception"')
 const info = await excSession.exceptionInfo(undefined)
-assert.match(info.exceptionId, /ZeroDivisionError/, `异常应为 ZeroDivisionError，实际 ${info.exceptionId}`)
-console.log(`  通过: ${info.exceptionId} @ line ${excHit.snapshot.frame?.line}`)
+assert.match(info.exceptionId, /ZeroDivisionError/, `exception must be ZeroDivisionError, got ${info.exceptionId}`)
+console.log(`  ok: ${info.exceptionId} @ line ${excHit.snapshot.frame?.line}`)
 await manager.disconnect(owner, excSession.id, true)
-console.log('  场景 C 断开完成')
+console.log('  scenario C disconnected')
 
-// ================= 场景 7：资源清理 =================
-console.log('\n=== [7] 断开后无残留进程 ===')
+// ================= Scenario 7: resource cleanup =================
+console.log('\n=== [7] no leftover processes after disconnect ===')
 await new Promise(resolve => setTimeout(resolve, 1500))
 const remaining = countDebugpyAdapters()
-assert.equal(remaining, baselineAdapters, `断连后不应有残留 debugpy.adapter 进程（基线 ${baselineAdapters}，现在 ${remaining}）`)
-console.log(`  通过: debugpy.adapter 进程 ${baselineAdapters} -> ${remaining}`)
+assert.equal(remaining, baselineAdapters, `no debugpy.adapter processes may survive disconnect (baseline ${baselineAdapters}, now ${remaining})`)
+console.log(`  ok: debugpy.adapter processes ${baselineAdapters} -> ${remaining}`)
 
-// ================= 场景 8：台账 =================
-console.log('\n=== [8] 调试会话台账（ledger.jsonl） ===')
+// ================= Scenario 8: ledger =================
+console.log('\n=== [8] debug session ledger (ledger.jsonl) ===')
 const lines = readFileSync(LEDGER_PATH, 'utf8').trim().split('\n').map(line => JSON.parse(line))
-console.log(`  共 ${lines.length} 条记录：`)
+console.log(`  ${lines.length} entries:`)
 for (const entry of lines) {
   const detail = Object.keys(entry.detail).length > 0 ? JSON.stringify(entry.detail) : ''
   console.log(`  - [${entry.ts}] ${entry.sessionId} ${entry.kind} ${detail}`)
 }
 const kinds = new Set(lines.map(entry => entry.kind))
 for (const kind of ['session_start', 'breakpoints_set', 'breakpoint_hit', 'exception', 'stop', 'session_end']) {
-  assert.ok(kinds.has(kind), `台账应含 ${kind} 条目，实际: ${[...kinds].join(',')}`)
+  assert.ok(kinds.has(kind), `ledger must contain ${kind} entries, got: ${[...kinds].join(',')}`)
 }
 const hits = lines.filter(entry => entry.kind === 'breakpoint_hit')
-assert.ok(hits.some(entry => entry.detail.line === 13), '断点命中条目应含 line=13')
-assert.ok(hits.some(entry => entry.detail.line === 11), '断点命中条目应含 line=11')
+assert.ok(hits.some(entry => entry.detail.line === 13), 'breakpoint_hit entries must include line=13')
+assert.ok(hits.some(entry => entry.detail.line === 11), 'breakpoint_hit entries must include line=11')
 const exceptions = lines.filter(entry => entry.kind === 'exception')
-assert.ok(exceptions.length >= 1 && exceptions[0].detail.line === 5, '异常条目应含 line=5')
+assert.ok(exceptions.length >= 1 && exceptions[0].detail.line === 5, 'exception entries must include line=5')
 const ends = lines.filter(entry => entry.kind === 'session_end')
-assert.equal(ends.length, 3, '三个会话都应记 session_end')
-console.log('  通过: 台账包含全部关键事件种类，断点/异常条目带位置')
+assert.equal(ends.length, 3, 'all three sessions must record session_end')
+console.log('  ok: ledger covers every key event kind; breakpoint/exception entries carry locations')
 
 await manager.disposeAll()
-console.log('\n===== E2E 全部通过 =====')
+console.log('\n===== E2E all checks passed =====')
 } finally {
-  // 断言失败时也要清理全部适配器进程，避免残留。
+  // Clean up every adapter process on assertion failure too; no leftovers.
   await manager.disposeAll()
 }
