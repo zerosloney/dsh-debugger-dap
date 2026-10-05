@@ -810,7 +810,10 @@ export function spawnTcpAdapterWithDiscovery(
       const groups = match.slice(1)
       const port = Number(groups[groups.length - 1])
       const hostGroup = groups.length >= 2 ? groups[groups.length - 2] : undefined
-      const matchHost = typeof hostGroup === 'string' && hostGroup.length > 0 ? hostGroup : undefined
+      // net.connect treats a bracketed IPv6 literal ('[::1]') as a DNS name
+      // and fails; connect with the bare address instead.
+      const matchHost =
+        typeof hostGroup === 'string' && hostGroup.length > 0 ? hostGroup.replace(/^\[(.+)\]$/, '$1') : undefined
       const connectHost = options.host ?? matchHost ?? host
       // Announcement received: swap the discovery window for the connect
       // window, so a slow bind is bounded by its own deadline.

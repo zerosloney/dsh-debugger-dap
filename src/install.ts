@@ -306,16 +306,22 @@ async function installDlv(deps: InstallDeps, timeoutMs: number, managedRoot: str
   return { adapter: 'dlv', alreadyInstalled: false, installed: true, command: dest, output: tail(installed.output) }
 }
 
-/** netcoredbg asset name per platform, or an error naming the manual URL. */
-export function netcoredbgAsset(): string {
-  const { platform, arch } = process
-  if (platform === 'win32' && arch === 'x64') return 'netcoredbg-win64.zip'
-  if (platform === 'linux' && arch === 'x64') return 'netcoredbg-linux-amd64.tar.gz'
-  if (platform === 'linux' && arch === 'arm64') return 'netcoredbg-linux-arm64.tar.gz'
-  if (platform === 'darwin' && arch === 'x64') return 'netcoredbg-macos-amd64.tar.gz'
-  if (platform === 'darwin' && arch === 'arm64') return 'netcoredbg-macos-arm64.tar.gz'
+/**
+ * netcoredbg asset name per platform, or an error naming the manual URL.
+ * The names must match the actual assets published on the Samsung/netcoredbg
+ * latest release (win64.zip, linux-amd64/arm64.tar.gz, osx-arm64.zip); the
+ * upstream publishes no x64 macOS asset, so that combination errors out.
+ */
+export function netcoredbgAsset(
+  forPlatform: NodeJS.Platform = process.platform,
+  forArch: string = process.arch,
+): string {
+  if (forPlatform === 'win32' && forArch === 'x64') return 'netcoredbg-win64.zip'
+  if (forPlatform === 'linux' && forArch === 'x64') return 'netcoredbg-linux-amd64.tar.gz'
+  if (forPlatform === 'linux' && forArch === 'arm64') return 'netcoredbg-linux-arm64.tar.gz'
+  if (forPlatform === 'darwin' && forArch === 'arm64') return 'netcoredbg-osx-arm64.zip'
   throw new Error(
-    `No prebuilt netcoredbg asset for ${platform}-${arch}. Download it manually from https://github.com/Samsung/netcoredbg/releases and ensure 'netcoredbg' is on PATH.`,
+    `No prebuilt netcoredbg asset for ${forPlatform}-${forArch} (the upstream release ships netcoredbg-win64.zip, netcoredbg-linux-amd64.tar.gz, netcoredbg-linux-arm64.tar.gz, and netcoredbg-osx-arm64.zip). Download it manually from https://github.com/Samsung/netcoredbg/releases and ensure 'netcoredbg' is on PATH.`,
   )
 }
 

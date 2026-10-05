@@ -81,8 +81,13 @@ export interface InstallOptions {
     /** Override the managed root (tests). */
     managedRoot?: string;
 }
-/** netcoredbg asset name per platform, or an error naming the manual URL. */
-export declare function netcoredbgAsset(): string;
+/**
+ * netcoredbg asset name per platform, or an error naming the manual URL.
+ * The names must match the actual assets published on the Samsung/netcoredbg
+ * latest release (win64.zip, linux-amd64/arm64.tar.gz, osx-arm64.zip); the
+ * upstream publishes no x64 macOS asset, so that combination errors out.
+ */
+export declare function netcoredbgAsset(forPlatform?: NodeJS.Platform, forArch?: string): string;
 /**
  * Install (or report) one adapter. Throws on failure with the bounded
  * output tail embedded; resolves with {@link InstallOutcome} on success

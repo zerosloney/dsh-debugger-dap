@@ -511,3 +511,25 @@ test('createAutoInstallingResolver folds install failures into the hint', async 
     error => /pip install debugpy failed/.test(error.message) && /Auto-install of 'debugpy' failed/.test(error.message),
   )
 })
+
+test('createAutoInstallingResolver does not suggest a host restart after a failed re-resolve', async () => {
+  // Fresh installs are registered in-process (addManagedBinDir), so a host
+  // restart is never the fix; the hint must name the real remaining causes.
+  const { createAutoInstallingResolver } = await import('../lib/adapters.js')
+  const resolver = createAutoInstallingResolver(undefined, {
+    autoInstall: true,
+    // Install "succeeds" (the import pre-check passes), but resolution still
+    // fails because the probe never sees the command.
+    installDeps: {
+      runCommand: async () => ({ code: 0, output: '' }),
+    },
+    commandExists: () => false,
+  })
+  await assert.rejects(
+    resolver({ program: '/w/app.py' }),
+    error =>
+      /'debugpy' was installed but still does not resolve/.test(error.message) &&
+      /commandExists probe/.test(error.message) &&
+      !/restart/.test(error.message),
+  )
+})

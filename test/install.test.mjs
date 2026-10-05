@@ -201,3 +201,16 @@ test('netcoredbg: release is downloaded, extracted, and the binary dir is marked
     rmSync(managedRoot, { recursive: true, force: true })
   }
 })
+
+test('netcoredbgAsset matches the actual upstream release asset names', () => {
+  assert.equal(netcoredbgAsset('win32', 'x64'), 'netcoredbg-win64.zip')
+  assert.equal(netcoredbgAsset('linux', 'x64'), 'netcoredbg-linux-amd64.tar.gz')
+  assert.equal(netcoredbgAsset('linux', 'arm64'), 'netcoredbg-linux-arm64.tar.gz')
+  assert.equal(netcoredbgAsset('darwin', 'arm64'), 'netcoredbg-osx-arm64.zip')
+})
+
+test('netcoredbgAsset errors for platforms without a prebuilt asset', () => {
+  // The upstream release publishes no x64 macOS asset; the error names what exists.
+  assert.throws(() => netcoredbgAsset('darwin', 'x64'), /No prebuilt netcoredbg asset for darwin-x64/)
+  assert.throws(() => netcoredbgAsset('win32', 'arm64'), /No prebuilt netcoredbg asset for win32-arm64/)
+})

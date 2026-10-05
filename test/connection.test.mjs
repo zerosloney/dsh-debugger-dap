@@ -365,6 +365,45 @@ server.listen(0, '127.0.0.1', () => {
   }
 })
 
+test('discovery strips brackets from an announced bracketed host', async () => {
+  // net.connect treats '[127.0.0.1]' as a DNS name and fails; a bracketed
+  // announcement (some DAP servers print '[::1]:port') must still land.
+  const script = `
+const net = require('node:net')
+const server = net.createServer(socket => {
+  let buf = Buffer.alloc(0)
+  socket.on('data', chunk => {
+    buf = Buffer.concat([buf, chunk])
+    const headerEnd = buf.indexOf('\\r\\n\\r\\n')
+    if (headerEnd === -1) return
+    const match = /Content-Length: (\\d+)/.exec(buf.slice(0, headerEnd).toString())
+    if (match === null) return
+    const length = Number(match[1])
+    const bodyStart = headerEnd + 4
+    if (buf.length < bodyStart + length) return
+    const message = JSON.parse(buf.slice(bodyStart, bodyStart + length).toString())
+    const reply = { seq: 1, type: 'response', request_seq: message.seq, command: message.command, success: true }
+    const body = Buffer.from(JSON.stringify(reply))
+    socket.write(Buffer.concat([Buffer.from('Content-Length: ' + body.length + '\\r\\n\\r\\n'), body]))
+  })
+})
+server.listen(0, '127.0.0.1', () => {
+  console.log('Debug server listening at [127.0.0.1]:' + server.address().port)
+})
+`
+  const spawned = await spawnTcpAdapterWithDiscovery([process.execPath, '-e', script], {
+    discoveryTimeoutMs: 5000,
+    requestTimeoutMs: 5000,
+    portPattern: JS_DEBUG_PORT_PATTERN,
+  })
+  try {
+    const reply = await spawned.connection.send('initialize', { adapterID: 'test' })
+    assert.deepEqual(reply, {})
+  } finally {
+    await spawned.kill()
+  }
+})
+
 test('fixed-port spawn drains adapter stdout so a chatty adapter keeps answering', async () => {
   // The child synchronously writes 512 KiB to stdout after binding — far
   // beyond any OS pipe buffer. Without a stdout reader on the parent side

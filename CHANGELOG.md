@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2026-10-05
+
+### Fixed
+
+- **netcoredbg 的 macOS 资产名与上游 release 不符（macOS 自动安装必败）**：`netcoredbgAsset()` 此前期望
+  `netcoredbg-macos-amd64.tar.gz` / `netcoredbg-macos-arm64.tar.gz`，而 Samsung/netcoredbg 最新 release
+  实际发布的是 `netcoredbg-osx-arm64.zip`，且没有 x64 macOS 资产——macOS 上两种架构都会在解析 release
+  元数据时失败。现按实际资产名选择（darwin/arm64 → `netcoredbg-osx-arm64.zip`），无预编译资产的组合
+  （如 darwin/x64）直接报错并列出上游实际资产；函数新增可选 `platform`/`arch` 参数，全平台映射有测试覆盖。
+- **端口发现对方括号主机名的兜底**：公告形如 `[::1]:8123` 时，捕获的 host 带方括号，`net.connect` 会把
+  `[::1]` 当作 DNS 名解析而必然失败；现剥掉方括号后再连接（回归测试以方括号 IPv4 字面量公告覆盖）。
+
+### Changed
+
+- **自动安装重试失败文案修正**：新装的适配器目录在本进程内即时生效（`addManagedBinDir`），
+  无需重启宿主；原"may need a host restart"提示不实，现指向真实可能原因——配方启动命令自身缺失
+  （如解释器不在 PATH），或自定义 `commandExists` 探测未覆盖托管目录。
+- **可执行探测去重**：`defaultCommandExists` 的裸命令探测改走 `probeExecutable` 这一份实现，消除
+  "PATH + 托管目录 + 平台后缀"的重复逻辑（两处实现细节已现分叉：`existsSync` vs `accessSync`）；
+  绝对路径与 `~` 展开行为不变，托管目录探测由两侧既有测试共同回归。
+
 ## [0.1.9] - 2026-09-25
 
 ### Fixed

@@ -5,11 +5,11 @@
  * it ships as a TCP DAP server script rather than a PATH command.
  */
 
-import { basename, delimiter, dirname, isAbsolute, join, normalize, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path'
 import { accessSync, existsSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
-import { INSTALLABLE_ADAPTERS, installAdapter, managedBinDirs, type InstallDeps } from './install.js'
+import { INSTALLABLE_ADAPTERS, installAdapter, probeExecutable, type InstallDeps } from './install.js'
 
 /** One launchable adapter command line. */
 export interface AdapterSpec {
@@ -429,8 +429,11 @@ export function createAutoInstallingResolver(
         return attempt()
       } catch (retryError) {
         const detail = retryError instanceof Error ? retryError.message : String(retryError)
+        // Fresh installs are registered in-process (addManagedBinDir), so no
+        // restart is involved; point at the real remaining causes instead.
         throw new AdapterUnavailableError(
-          `'${wanted}' was installed but still does not resolve: ${detail}\nThe managed adapter directory may need a host restart to be picked up.`,
+          `'${wanted}' was installed but still does not resolve: ${detail}\n` +
+            'Fresh installs are probed in-process; the recipe\'s launch command may itself be missing (e.g. an interpreter not on PATH), or a custom commandExists probe ignores the managed adapter dir.',
         )
       }
     }
@@ -439,9 +442,8 @@ export function createAutoInstallingResolver(
 
 /**
  * Default PATH probe. Absolute paths are checked directly; bare names are
- * probed against every PATH directory plus the plugin-managed adapter
- * directories (see {@link managedBinDirs}) with the platform executable
- * suffixes.
+ * delegated to {@link probeExecutable}, which also covers the plugin-managed
+ * adapter directories with the platform executable suffixes.
  */
 export function defaultCommandExists(command: string): boolean {
   const expanded = expandPath(command)
@@ -453,25 +455,7 @@ export function defaultCommandExists(command: string): boolean {
       return false
     }
   }
-  const directories = (process.env.PATH ?? '')
-    .split(delimiter)
-    .filter(entry => entry.length > 0)
-    .concat(managedBinDirs())
-  const extensions =
-    process.platform === 'win32'
-      ? Array.from(new Set([(process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';').map(ext => ext.toLowerCase()), ''].flat()))
-      : ['']
-  for (const directory of directories) {
-    for (const extension of extensions) {
-      try {
-        accessSync(join(directory, expanded + extension))
-        return true
-      } catch {
-        // try the next candidate
-      }
-    }
-  }
-  return false
+  return probeExecutable(expanded)
 }
 
 /**

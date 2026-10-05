@@ -128,9 +128,8 @@ export declare function createAutoInstallingResolver(adapterConfig: Record<strin
 }) => Promise<AdapterSpec>;
 /**
  * Default PATH probe. Absolute paths are checked directly; bare names are
- * probed against every PATH directory plus the plugin-managed adapter
- * directories (see {@link managedBinDirs}) with the platform executable
- * suffixes.
+ * delegated to {@link probeExecutable}, which also covers the plugin-managed
+ * adapter directories with the platform executable suffixes.
  */
 export declare function defaultCommandExists(command: string): boolean;
 /**
